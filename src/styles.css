@@ -377,6 +377,23 @@ h2 {
   grid-row: span 2;
 }
 
+.reference-images-field {
+  grid-column: 1 / -1;
+}
+
+.field-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-heading small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .paste-zone {
   position: relative;
   display: grid;
@@ -488,10 +505,69 @@ h2 {
   background: #121412;
 }
 
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
+  gap: 8px;
+  min-height: 104px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.reference-grid.is-empty {
+  place-items: center;
+}
+
+.reference-tile {
+  position: relative;
+  aspect-ratio: 1;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #121412;
+}
+
+.reference-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.reference-tile button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.45);
+  background: rgba(18, 20, 18, 0.78);
+}
+
+.reference-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .image-actions {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 8px;
+}
+
+.reference-actions {
+  grid-template-columns: auto 1fr auto;
 }
 
 .toggles {

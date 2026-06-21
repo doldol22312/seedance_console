@@ -17,6 +17,7 @@ const MEDIA_PREFLIGHT_TIMEOUT_MS = Number(process.env.MEDIA_PREFLIGHT_TIMEOUT_MS
 const MEDIA_PREFLIGHT_BYTES = Number(process.env.MEDIA_PREFLIGHT_BYTES || 2048);
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "64mb";
 const KEY_COOLDOWN_MS = Number(process.env.ARK_KEY_COOLDOWN_MS || 60_000);
+const MAX_REFERENCE_IMAGES = 9;
 
 const app = express();
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
@@ -320,6 +321,7 @@ function createKeyPool({ baseUrl, timeoutMs, cooldownMs }) {
 async function buildCreatePayload(input = {}) {
   const prompt = String(input.prompt || "").trim();
   const imageUrl = normalizeMediaReference(input.imageUrl);
+  const referenceImages = normalizeMediaReferences(input.referenceImages || input.referenceImageUrls || input.referenceImageUrl);
   const audioUrl = normalizeMediaReference(input.audioUrl);
   const videoUrl = normalizeMediaReference(input.videoUrl);
   const model = String(input.model || "doubao-seedance-2-0-fast-260128").trim();
@@ -334,7 +336,19 @@ async function buildCreatePayload(input = {}) {
     content.push({
       type: "image_url",
       image_url: { url: imageUrl },
-      ...(hasReferenceMedia ? { role: "reference_image" } : {})
+      ...(hasReferenceMedia && !referenceImages.length ? { role: "reference_image" } : {})
+    });
+  }
+
+  if (referenceImages.length > MAX_REFERENCE_IMAGES) {
+    throw httpError(400, `Seedance 2.0 supports up to ${MAX_REFERENCE_IMAGES} reference images.`);
+  }
+
+  for (const referenceImageUrl of referenceImages) {
+    content.push({
+      type: "image_url",
+      image_url: { url: referenceImageUrl },
+      role: "reference_image"
     });
   }
 
@@ -490,6 +504,16 @@ function normalizeMediaReference(value) {
   const match = trimmed.match(/\b(?:https?:\/\/|asset:\/\/)\S+/i);
   const reference = match ? match[0] : trimmed;
   return reference.replace(/[)\].,;'"`]+$/g, "");
+}
+
+function normalizeMediaReferences(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "")
+        .split(/\n+/)
+        .map((item) => item.trim());
+
+  return [...new Set(values.map((item) => normalizeMediaReference(item?.url || item)).filter(Boolean))];
 }
 
 async function validateRemoteMediaReference(value, kind) {

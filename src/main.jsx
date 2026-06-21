@@ -44,6 +44,7 @@ const STATUS_CLASS = {
 
 const MAX_PASTED_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_PASTED_VIDEO_BYTES = 22 * 1024 * 1024;
+const MAX_REFERENCE_IMAGES = 9;
 
 function App() {
   const [config, setConfig] = React.useState(null);
@@ -56,11 +57,13 @@ function App() {
   const [lookupId, setLookupId] = React.useState("");
   const [imageAsset, setImageAsset] = React.useState(null);
   const [videoAsset, setVideoAsset] = React.useState(null);
+  const [referenceImageInput, setReferenceImageInput] = React.useState("");
   const [form, setForm] = React.useState({
     model: MODELS[0].id,
     prompt:
       "A silver train crosses a flooded salt flat at dusk, reflections ripple under the wheels, controlled cinematic camera movement",
     imageUrl: "",
+    referenceImages: [],
     videoUrl: "",
     audioUrl: "",
     resolution: "720p",
@@ -271,6 +274,27 @@ function App() {
     setNotice({ type: "good", text: "Clipboard image attached" });
   }
 
+  async function attachReferenceImageFile(file) {
+    if (!file?.type?.startsWith("image/")) {
+      setNotice({ type: "bad", text: "Paste an image file." });
+      return;
+    }
+
+    if (file.size > MAX_PASTED_IMAGE_BYTES) {
+      setNotice({ type: "bad", text: "Reference image is larger than 15 MB." });
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file, "reference image");
+    addReferenceImage({
+      url: dataUrl,
+      name: file.name || "clipboard image",
+      size: file.size,
+      type: file.type,
+      preview: dataUrl
+    });
+  }
+
   async function attachVideoFile(file) {
     if (!file?.type?.startsWith("video/")) {
       setNotice({ type: "bad", text: "Paste a video file." });
@@ -296,6 +320,73 @@ function App() {
   function clearImageAsset() {
     setImageAsset(null);
     updateForm("imageUrl", "");
+  }
+
+  function addReferenceImage(reference) {
+    const url = typeof reference === "string" ? reference.trim() : String(reference?.url || "").trim();
+    if (!url) return false;
+
+    let added = false;
+    setForm((current) => {
+      const currentReferences = Array.isArray(current.referenceImages) ? current.referenceImages : [];
+      if (currentReferences.length >= MAX_REFERENCE_IMAGES) {
+        setNotice({ type: "bad", text: `Seedance supports up to ${MAX_REFERENCE_IMAGES} reference images.` });
+        return current;
+      }
+
+      const duplicate = currentReferences.some((item) => String(item?.url || item).trim() === url);
+      if (duplicate) {
+        setNotice({ type: "warn", text: "Reference image is already attached." });
+        return current;
+      }
+
+      added = true;
+      const item =
+        typeof reference === "string"
+          ? { url, name: referenceLabel(url), preview: url }
+          : { ...reference, url, preview: reference.preview || url };
+
+      return {
+        ...current,
+        referenceImages: [...currentReferences, item]
+      };
+    });
+
+    if (added) {
+      setNotice({ type: "good", text: "Reference image attached" });
+    }
+    return added;
+  }
+
+  function addReferenceImageUrl() {
+    if (addReferenceImage(referenceImageInput)) {
+      setReferenceImageInput("");
+    }
+  }
+
+  function removeReferenceImage(index) {
+    setForm((current) => ({
+      ...current,
+      referenceImages: (Array.isArray(current.referenceImages) ? current.referenceImages : []).filter((_, itemIndex) => itemIndex !== index)
+    }));
+  }
+
+  async function pasteReferenceImage() {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const mediaType = item.types.find((type) => type.startsWith("image/"));
+        if (!mediaType) continue;
+
+        const blob = await item.getType(mediaType);
+        await attachReferenceImageFile(new File([blob], `reference.${extensionForType(mediaType)}`, { type: mediaType }));
+        return;
+      }
+
+      setNotice({ type: "bad", text: "Clipboard does not contain an image." });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
+    }
   }
 
   function clearVideoAsset() {
@@ -461,6 +552,50 @@ function App() {
                   }}
                   placeholder="https://..."
                 />
+              </div>
+            </div>
+            <div className="field reference-images-field">
+              <div className="field-heading">
+                <span>Reference Images</span>
+                <small>{form.referenceImages.length}/{MAX_REFERENCE_IMAGES}</small>
+              </div>
+              <div className={`reference-grid ${form.referenceImages.length ? "" : "is-empty"}`}>
+                {form.referenceImages.length ? (
+                  form.referenceImages.map((reference, index) => (
+                    <div className="reference-tile" key={`${reference.url}-${index}`}>
+                      <img src={reference.preview || reference.url} alt={`Reference ${index + 1}`} />
+                      <button type="button" onClick={() => removeReferenceImage(index)} aria-label="Remove reference image">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <div className="reference-empty">
+                    <ImagePlus size={20} />
+                    <span>Add up to 9 reference images</span>
+                  </div>
+                )}
+              </div>
+              <div className="image-actions reference-actions">
+                <button type="button" onClick={pasteReferenceImage}>
+                  <Clipboard size={16} />
+                  Paste
+                </button>
+                <input
+                  value={referenceImageInput}
+                  onChange={(event) => setReferenceImageInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addReferenceImageUrl();
+                    }
+                  }}
+                  placeholder="https://... or asset://..."
+                />
+                <button type="button" onClick={addReferenceImageUrl}>
+                  <ImagePlus size={16} />
+                  Add
+                </button>
               </div>
             </div>
             <label className="field">
@@ -660,6 +795,26 @@ function extensionForType(type) {
 
 function isDataVideoUrl(value) {
   return String(value || "").trim().toLowerCase().startsWith("data:video/");
+}
+
+function referenceLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "reference image";
+  if (text.startsWith("asset://")) return text;
+
+  try {
+    const url = new URL(text);
+    return pathTail(url.pathname) || url.hostname;
+  } catch {
+    return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+  }
+}
+
+function pathTail(value) {
+  return String(value || "")
+    .split("/")
+    .filter(Boolean)
+    .pop();
 }
 
 function formatBytes(bytes) {
