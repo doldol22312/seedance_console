@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { SocksProxyAgent } from "socks-proxy-agent";
 
 const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
-const DEFAULT_PROXY_URL = "socks5://127.0.0.1:2080";
+const DEFAULT_PROXY_URL = "";
 const PORT = Number(process.env.PORT || 8787);
 const BASE_URL = stripTrailingSlash(process.env.ARK_BASE_URL || DEFAULT_BASE_URL);
 const PROXY_URL = normalizeProxyUrl(process.env.ARK_PROXY_URL ?? DEFAULT_PROXY_URL);
