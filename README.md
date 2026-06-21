@@ -8,6 +8,8 @@ Local web app for Seedance 2.0 on Volcengine Ark. It includes:
 - Seedance 2.0 / Seedance 2.0 Fast task creation
 - task polling and video preview
 - clipboard image/video paste for reference media inputs
+- automatic Litterbox upload for pasted reference videos
+- optional autosave of generated videos to a local folder
 - up to 9 Seedance 2.0 reference images
 
 ## Setup
@@ -26,11 +28,13 @@ For first-frame image-to-video, focus the Generation panel and paste an image wi
 
 For Seedance 2.0 reference images, use the Reference Images field. It supports pasted images, public image URLs, and `asset://` IDs. Each entry is sent as an `image_url` content item with `role: "reference_image"`, up to 9 images.
 
-Pasted images can be submitted directly. Pasted videos are previewed in the UI, but Seedance video references must be a public video URL or `asset://` ID before submission.
+Pasted images can be submitted directly. Pasted videos are previewed immediately, uploaded to Litterbox, and then submitted as the returned public video URL. The default Litterbox expiry is `12h`; set `LITTERBOX_EXPIRY` to `1h`, `12h`, `24h`, or `72h` to change it.
 
 The backend performs a small byte-range preflight for public Video and Audio URLs before creating an Ark task. If Ark still reports `timeout while fetching resource`, the file host is not reachable fast enough from Volcengine Ark; rehost the media on a stable public bucket/CDN or use an `asset://` ID.
 
-Video and Audio reference media are sent with `reference_video` and `reference_audio`. Pasted local videos are preview-only; Seedance video references must be a public video URL or `asset://` ID before submission.
+Video and Audio reference media are sent with `reference_video` and `reference_audio`. Manual Video URL entries can still be public video URLs or `asset://` IDs.
+
+Use the Autosave panel to enable local saving of generated videos. Choose a folder with the system dialog or enter a writable folder path manually; settings save automatically. Completed task videos are downloaded by the backend after polling returns `content.video_url`. The setting is stored in `.autosave-settings.json`, and `.env` can provide initial defaults with `AUTOSAVE_ENABLED` and `AUTOSAVE_DIR`.
 
 ## Ark Defaults
 

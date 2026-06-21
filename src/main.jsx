@@ -4,10 +4,10 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
-  Clapperboard,
   Clipboard,
   Copy,
   Film,
+  FolderOpen,
   Gauge,
   ImagePlus,
   KeyRound,
@@ -52,12 +52,20 @@ function App() {
   const [keys, setKeys] = React.useState([]);
   const [keysBusy, setKeysBusy] = React.useState(false);
   const [generateBusy, setGenerateBusy] = React.useState(false);
+  const [videoUploadBusy, setVideoUploadBusy] = React.useState(false);
+  const [folderPickerBusy, setFolderPickerBusy] = React.useState(false);
   const [notice, setNotice] = React.useState(null);
   const [tasks, setTasks] = React.useState([]);
   const [lookupId, setLookupId] = React.useState("");
   const [imageAsset, setImageAsset] = React.useState(null);
   const [videoAsset, setVideoAsset] = React.useState(null);
+  const videoUploadTokenRef = React.useRef(null);
   const [referenceImageInput, setReferenceImageInput] = React.useState("");
+  const [autosave, setAutosave] = React.useState({
+    enabled: false,
+    directory: ""
+  });
+  const autosaveSaveTimerRef = React.useRef(null);
   const [form, setForm] = React.useState({
     model: MODELS[0].id,
     prompt:
@@ -76,6 +84,7 @@ function App() {
 
   React.useEffect(() => {
     refreshKeys();
+    refreshAutosave();
     api("/api/config")
       .then(setConfig)
       .catch((error) => setNotice({ type: "bad", text: error.message }));
@@ -88,7 +97,15 @@ function App() {
   }, [form.model, form.resolution]);
 
   React.useEffect(() => {
-    const active = tasks.filter((task) => ["queued", "running", "submitted"].includes(task.status));
+    return () => {
+      if (autosaveSaveTimerRef.current) {
+        window.clearTimeout(autosaveSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const active = tasks.filter((task) => ["queued", "running", "submitted"].includes(task.status) || task.autosave?.status === "saving");
     if (!active.length) return undefined;
 
     const timer = window.setInterval(() => {
@@ -151,8 +168,95 @@ function App() {
     setKeys(data.keys || []);
   }
 
+  async function refreshAutosave() {
+    try {
+      const data = await api("/api/autosave");
+      setAutosave({
+        enabled: Boolean(data.enabled),
+        directory: data.directory || ""
+      });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+    }
+  }
+
+  async function persistAutosaveSettings(next, options = {}) {
+    try {
+      const data = await api("/api/autosave", {
+        method: "PUT",
+        body: next
+      });
+      setAutosave({
+        enabled: Boolean(data.enabled),
+        directory: data.directory || ""
+      });
+      if (options.notice) {
+        setNotice({
+          type: data.enabled ? "good" : "warn",
+          text: data.enabled ? "Autosave settings updated." : "Autosave disabled."
+        });
+      }
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+      refreshAutosave();
+    }
+  }
+
+  function updateAutosave(name, value, options = {}) {
+    const nextSettings = { ...autosave, [name]: value };
+    setAutosave(nextSettings);
+
+    if (autosaveSaveTimerRef.current) {
+      window.clearTimeout(autosaveSaveTimerRef.current);
+    }
+
+    if (options.persist !== false) {
+      const save = () => persistAutosaveSettings(nextSettings, { notice: options.notice });
+      if (options.debounce) {
+        autosaveSaveTimerRef.current = window.setTimeout(save, 650);
+      } else {
+        save();
+      }
+    }
+  }
+
+  async function chooseAutosaveFolder() {
+    setFolderPickerBusy(true);
+    setNotice({ type: "warn", text: "Choose an autosave folder in the system dialog." });
+
+    try {
+      const data = await api("/api/autosave/browse-folder", {
+        method: "POST",
+        body: {
+          directory: autosave.directory
+        }
+      });
+
+      if (!data.directory) {
+        setNotice({ type: "warn", text: "Folder selection cancelled." });
+        return;
+      }
+
+      updateAutosave("directory", data.directory, { notice: true });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+    } finally {
+      setFolderPickerBusy(false);
+    }
+  }
+
   async function submitGenerate(event) {
     event.preventDefault();
+    if (videoUploadBusy) {
+      setNotice({ type: "warn", text: "Wait for the reference video upload to finish." });
+      return;
+    }
+
+    if (videoAsset && !form.videoUrl) {
+      setNotice({ type: "bad", text: "Reference video upload failed. Paste the video again or clear it." });
+      return;
+    }
+
     if (isDataVideoUrl(form.videoUrl)) {
       setNotice({
         type: "bad",
@@ -306,15 +410,56 @@ function App() {
       return;
     }
 
+    const uploadToken = `${Date.now()}-${Math.random()}`;
     const dataUrl = await fileToDataUrl(file, "video");
+    videoUploadTokenRef.current = uploadToken;
+    setVideoUploadBusy(true);
     setVideoAsset({
+      id: uploadToken,
       name: file.name || "clipboard video",
       size: file.size,
       type: file.type,
-      preview: dataUrl
+      preview: dataUrl,
+      uploadStatus: "uploading"
     });
-    updateForm("videoUrl", dataUrl);
-    setNotice({ type: "warn", text: "Clipboard video preview attached. Use a public URL or asset:// ID to generate from it." });
+    updateForm("videoUrl", "");
+    setNotice({ type: "warn", text: "Uploading reference video to Litterbox..." });
+
+    try {
+      const data = await api("/api/uploads/reference-video", {
+        method: "POST",
+        body: {
+          dataUrl,
+          name: file.name || "clipboard-video",
+          type: file.type
+        }
+      });
+
+      if (videoUploadTokenRef.current !== uploadToken) return;
+
+      setVideoAsset((current) =>
+        current?.id === uploadToken
+          ? {
+              ...current,
+              url: data.url,
+              expires: data.expires,
+              uploadStatus: "ready"
+            }
+          : current
+      );
+      updateForm("videoUrl", data.url);
+      setNotice({ type: "good", text: `Reference video uploaded to Litterbox (${data.expires})` });
+    } catch (error) {
+      if (videoUploadTokenRef.current !== uploadToken) return;
+
+      setVideoAsset((current) => (current?.id === uploadToken ? { ...current, uploadStatus: "failed" } : current));
+      updateForm("videoUrl", "");
+      setNotice({ type: "bad", text: error.message || "Could not upload reference video to Litterbox." });
+    } finally {
+      if (videoUploadTokenRef.current === uploadToken) {
+        setVideoUploadBusy(false);
+      }
+    }
   }
 
   function clearImageAsset() {
@@ -390,6 +535,8 @@ function App() {
   }
 
   function clearVideoAsset() {
+    videoUploadTokenRef.current = null;
+    setVideoUploadBusy(false);
     setVideoAsset(null);
     updateForm("videoUrl", "");
   }
@@ -399,7 +546,7 @@ function App() {
       <header className="topbar">
         <div>
           <div className="eyebrow">
-            <Clapperboard size={16} />
+            <img className="brand-logo" src="/bytedance-color.svg" alt="" />
             Volcengine Ark
           </div>
           <h1>Seedance Console</h1>
@@ -413,7 +560,7 @@ function App() {
 
       {notice && (
         <div className={`notice ${notice.type}`}>
-          {notice.type === "bad" ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+          {notice.type === "good" ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
           <span>{notice.text}</span>
         </div>
       )}
@@ -460,6 +607,30 @@ function App() {
               <div className="empty-state">No active keys</div>
             )}
           </div>
+
+          <section className="side-section autosave-settings">
+            <div className="side-section-title">
+              <FolderOpen size={17} />
+              <h3>Autosave</h3>
+            </div>
+            <Toggle label="Save videos" checked={autosave.enabled} onChange={(value) => updateAutosave("enabled", value, { notice: true })} />
+            <div className="field">
+              <span>Folder</span>
+              <div className="autosave-folder-row">
+                <input
+                  value={autosave.directory}
+                  onChange={(event) => updateAutosave("directory", event.target.value, { debounce: true })}
+                  placeholder="C:\Users\agalq\Videos\Seedance"
+                  disabled={folderPickerBusy}
+                />
+                <button type="button" onClick={chooseAutosaveFolder} disabled={folderPickerBusy}>
+                  {folderPickerBusy ? <Loader2 className="spin" size={16} /> : <FolderOpen size={16} />}
+                  Choose
+                </button>
+              </div>
+            </div>
+            <small className="helper-text">Settings save automatically. Completed videos save after a poll returns the generated URL.</small>
+          </section>
         </aside>
 
         <form className="panel composer" onSubmit={submitGenerate} onPaste={handlePaste}>
@@ -532,7 +703,12 @@ function App() {
                   <video src={videoAsset.preview} controls muted preload="metadata" />
                   <div className="media-chip">
                     <strong>{videoAsset.name}</strong>
-                    <small>{formatBytes(videoAsset.size)} · {videoAsset.type}</small>
+                    <small>
+                      {formatBytes(videoAsset.size)} · {videoAsset.type}
+                      {videoAsset.uploadStatus === "uploading" ? " · uploading" : ""}
+                      {videoAsset.uploadStatus === "ready" ? ` · Litterbox ${videoAsset.expires}` : ""}
+                      {videoAsset.uploadStatus === "failed" ? " · upload failed" : ""}
+                    </small>
                   </div>
                   <button className="media-clear" type="button" onClick={clearVideoAsset} aria-label="Clear pasted video">
                     <X size={15} />
@@ -540,13 +716,16 @@ function App() {
                 </div>
               )}
               <div className="image-actions media-actions">
-                <button type="button" onClick={() => readClipboardMedia("video")}>
-                  <Clipboard size={16} />
+                <button type="button" onClick={() => readClipboardMedia("video")} disabled={videoUploadBusy}>
+                  {videoUploadBusy ? <Loader2 className="spin" size={16} /> : <Clipboard size={16} />}
                   Paste
                 </button>
                 <input
-                  value={form.videoUrl.startsWith("data:video/") ? "clipboard video attached" : form.videoUrl}
+                  value={videoUploadBusy ? "uploading to Litterbox..." : form.videoUrl}
+                  disabled={videoUploadBusy}
                   onChange={(event) => {
+                    videoUploadTokenRef.current = null;
+                    setVideoUploadBusy(false);
                     setVideoAsset(null);
                     updateForm("videoUrl", event.target.value);
                   }}
@@ -643,9 +822,9 @@ function App() {
             </div>
           </div>
 
-          <button className="launch-button" type="submit" disabled={generateBusy}>
-            {generateBusy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            Generate
+          <button className="launch-button" type="submit" disabled={generateBusy || videoUploadBusy}>
+            {generateBusy || videoUploadBusy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
+            {videoUploadBusy ? "Uploading video" : "Generate"}
           </button>
         </form>
 
@@ -739,6 +918,7 @@ function TaskCard({ task, onPoll }) {
             <Copy size={14} />
             Copy URL
           </button>
+          {task.autosave && <AutosaveStatus autosave={task.autosave} />}
         </div>
       ) : (
         <div className="pending-box">
@@ -748,6 +928,25 @@ function TaskCard({ task, onPoll }) {
       )}
     </article>
   );
+}
+
+function AutosaveStatus({ autosave }) {
+  const status = autosave.status || "saving";
+  const isSaved = status === "saved";
+  const isFailed = status === "failed";
+
+  return (
+    <div className={`autosave-state ${isSaved ? "good" : isFailed ? "bad" : "warn"}`}>
+      {isSaved ? <CheckCircle2 size={15} /> : isFailed ? <AlertTriangle size={15} /> : <Loader2 className="spin" size={15} />}
+      <span>{autosaveStatusText(autosave)}</span>
+    </div>
+  );
+}
+
+function autosaveStatusText(autosave) {
+  if (autosave.status === "saved") return `Saved to ${autosave.path}`;
+  if (autosave.status === "failed") return `Autosave failed: ${autosave.error || "unknown error"}`;
+  return `Saving to ${autosave.path}`;
 }
 
 function normalizeTask(data, fallbackStatus) {
@@ -763,6 +962,7 @@ function normalizeTask(data, fallbackStatus) {
     duration: data.duration,
     framespersecond: data.framespersecond,
     usage: data.usage,
+    autosave: data.autosave || null,
     error: data.error?.message || data.error
   };
 }

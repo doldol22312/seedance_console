@@ -119,6 +119,12 @@ select:focus {
   text-transform: uppercase;
 }
 
+.brand-logo {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+
 h1,
 h2 {
   margin: 0;
@@ -186,6 +192,11 @@ h2 {
   background: var(--red-soft);
 }
 
+.notice.warn {
+  border-color: rgba(180, 122, 0, 0.45);
+  background: var(--yellow-soft);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(270px, 0.82fr) minmax(420px, 1.45fr) minmax(330px, 1fr);
@@ -249,6 +260,37 @@ h2 {
   display: grid;
   gap: 8px;
   padding: 14px;
+}
+
+.side-section {
+  display: grid;
+  gap: 10px;
+  margin: 0 14px;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.side-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.side-section-title h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.autosave-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.helper-text {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .key-row {
@@ -686,6 +728,33 @@ h2 {
   justify-self: start;
   min-height: 34px;
   padding: 0 10px;
+}
+
+.autosave-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.autosave-state.good {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.autosave-state.warn {
+  color: var(--yellow);
+  background: var(--yellow-soft);
+}
+
+.autosave-state.bad {
+  color: var(--red);
+  background: var(--red-soft);
 }
 
 .pending-box,
