@@ -1,17 +1,25 @@
 import express from "express";
 import "dotenv/config";
+import fetch from "node-fetch";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { SocksProxyAgent } from "socks-proxy-agent";
 
 const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const DEFAULT_PROXY_URL = "socks5://127.0.0.1:2080";
 const PORT = Number(process.env.PORT || 8787);
 const BASE_URL = stripTrailingSlash(process.env.ARK_BASE_URL || DEFAULT_BASE_URL);
-const REQUEST_TIMEOUT_MS = Number(process.env.ARK_TIMEOUT_MS || 30_000);
+const PROXY_URL = normalizeProxyUrl(process.env.ARK_PROXY_URL ?? DEFAULT_PROXY_URL);
+const PROXY_AGENT = PROXY_URL ? new SocksProxyAgent(PROXY_URL) : null;
+const REQUEST_TIMEOUT_MS = Number(process.env.ARK_TIMEOUT_MS || 120_000);
+const MEDIA_PREFLIGHT_TIMEOUT_MS = Number(process.env.MEDIA_PREFLIGHT_TIMEOUT_MS || 20_000);
+const MEDIA_PREFLIGHT_BYTES = Number(process.env.MEDIA_PREFLIGHT_BYTES || 2048);
+const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "64mb";
 const KEY_COOLDOWN_MS = Number(process.env.ARK_KEY_COOLDOWN_MS || 60_000);
 
 const app = express();
-app.use(express.json({ limit: "32mb" }));
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 
 const pool = createKeyPool({
   baseUrl: BASE_URL,
@@ -26,6 +34,10 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     baseUrl: BASE_URL,
+    proxyUrl: publicProxyUrl(PROXY_URL),
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    mediaPreflightTimeoutMs: MEDIA_PREFLIGHT_TIMEOUT_MS,
+    requestBodyLimit: REQUEST_BODY_LIMIT,
     keyCount: pool.summary().length,
     activeKeys: pool.summary().filter((key) => key.usable).length
   });
@@ -88,7 +100,7 @@ app.delete("/api/keys/:id", (req, res) => {
 
 app.post("/api/generate", async (req, res) => {
   try {
-    const payload = buildCreatePayload(req.body);
+    const payload = await buildCreatePayload(req.body);
     const result = await pool.withKey(async (credential) => {
       const response = await arkFetch({
         baseUrl: BASE_URL,
@@ -156,6 +168,7 @@ if (process.env.NODE_ENV === "production") {
 
 app.listen(PORT, () => {
   console.log(`Seedance API server listening on http://localhost:${PORT}`);
+  console.log(`Ark proxy: ${publicProxyUrl(PROXY_URL) || "direct"}`);
 });
 
 function createKeyPool({ baseUrl, timeoutMs, cooldownMs }) {
@@ -304,28 +317,39 @@ function createKeyPool({ baseUrl, timeoutMs, cooldownMs }) {
   };
 }
 
-function buildCreatePayload(input = {}) {
+async function buildCreatePayload(input = {}) {
   const prompt = String(input.prompt || "").trim();
-  const imageUrl = String(input.imageUrl || "").trim();
-  const audioUrl = String(input.audioUrl || "").trim();
-  const videoUrl = String(input.videoUrl || "").trim();
+  const imageUrl = normalizeMediaReference(input.imageUrl);
+  const audioUrl = normalizeMediaReference(input.audioUrl);
+  const videoUrl = normalizeMediaReference(input.videoUrl);
   const model = String(input.model || "doubao-seedance-2-0-fast-260128").trim();
   const content = [];
+  const hasReferenceMedia = Boolean(videoUrl || audioUrl);
 
   if (prompt) {
     content.push({ type: "text", text: prompt });
   }
 
   if (imageUrl) {
-    content.push({ type: "image_url", image_url: { url: imageUrl } });
+    content.push({
+      type: "image_url",
+      image_url: { url: imageUrl },
+      ...(hasReferenceMedia ? { role: "reference_image" } : {})
+    });
   }
 
   if (videoUrl) {
-    content.push({ type: "video_url", video_url: { url: videoUrl } });
+    if (isDataVideoUrl(videoUrl)) {
+      throw httpError(400, "Seedance video references must be a public video URL or asset:// ID. Pasted local video files cannot be sent directly.");
+    }
+
+    await validateRemoteMediaReference(videoUrl, "video");
+    content.push({ type: "video_url", video_url: { url: videoUrl }, role: "reference_video" });
   }
 
   if (audioUrl) {
-    content.push({ type: "audio_url", audio_url: { url: audioUrl } });
+    await validateRemoteMediaReference(audioUrl, "audio");
+    content.push({ type: "audio_url", audio_url: { url: audioUrl }, role: "reference_audio" });
   }
 
   if (!model) {
@@ -379,6 +403,7 @@ async function arkFetch({ baseUrl, path: requestPath, method, key, timeoutMs, bo
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json"
       },
+      agent: PROXY_AGENT || undefined,
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal
     });
@@ -449,6 +474,170 @@ function stripTrailingSlash(value) {
   return String(value).replace(/\/+$/, "");
 }
 
+function isDataVideoUrl(value) {
+  return String(value || "").trim().toLowerCase().startsWith("data:video/");
+}
+
+function isAssetUrl(value) {
+  return String(value || "").trim().toLowerCase().startsWith("asset://");
+}
+
+function normalizeMediaReference(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("data:")) return trimmed;
+
+  const match = trimmed.match(/\b(?:https?:\/\/|asset:\/\/)\S+/i);
+  const reference = match ? match[0] : trimmed;
+  return reference.replace(/[)\].,;'"`]+$/g, "");
+}
+
+async function validateRemoteMediaReference(value, kind) {
+  if (isAssetUrl(value)) return;
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(value);
+  } catch {
+    throw httpError(400, `${capitalize(kind)} reference must be a direct http://, https://, or asset:// URL.`);
+  }
+
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    throw httpError(400, `${capitalize(kind)} reference must be a direct http://, https://, or asset:// URL.`);
+  }
+
+  const result = await preflightMediaUrl(parsedUrl.toString(), kind);
+  if (!isExpectedMediaType(kind, result.contentType, parsedUrl.pathname)) {
+    const actualType = result.contentType || "unknown content type";
+    throw httpError(
+      400,
+      `${capitalize(kind)} URL responded as ${actualType}. Use a direct ${kind} file URL, not a preview page.`
+    );
+  }
+}
+
+async function preflightMediaUrl(url, kind) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MEDIA_PREFLIGHT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: kind === "video" ? "video/*,*/*;q=0.8" : "audio/*,*/*;q=0.8",
+        Range: `bytes=0-${Math.max(MEDIA_PREFLIGHT_BYTES - 1, 0)}`
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw httpError(
+        400,
+        `${capitalize(kind)} URL returned HTTP ${response.status}. Make sure it is public and directly downloadable.`
+      );
+    }
+
+    const bytesRead = await readFirstResponseBytes(response, MEDIA_PREFLIGHT_BYTES);
+    const totalLength = parseContentRangeTotal(response.headers.get("content-range"));
+    const contentLength = parseContentLength(response.headers.get("content-length"));
+
+    if (bytesRead <= 0 || totalLength === 0 || contentLength === 0) {
+      throw httpError(400, `${capitalize(kind)} URL returned no media bytes. Use a direct public file URL.`);
+    }
+
+    return {
+      contentType: response.headers.get("content-type") || "",
+      bytesRead
+    };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw httpError(
+        400,
+        `${capitalize(kind)} URL could not be fetched within ${Math.round(MEDIA_PREFLIGHT_TIMEOUT_MS / 1000)}s. Ark is likely to return "timeout while fetching resource"; rehost it on a faster public URL or use an asset:// ID.`
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readFirstResponseBytes(response, byteLimit) {
+  if (!response.body) return 0;
+
+  let bytesRead = 0;
+  try {
+    for await (const chunk of response.body) {
+      bytesRead += chunk.length || Buffer.byteLength(chunk);
+      if (bytesRead >= byteLimit) break;
+    }
+  } finally {
+    response.body.destroy?.();
+  }
+
+  return bytesRead;
+}
+
+function parseContentLength(value) {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseContentRangeTotal(value) {
+  const match = String(value || "").match(/\/(\d+|\*)$/);
+  if (!match || match[1] === "*") return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isExpectedMediaType(kind, contentType, pathname) {
+  const normalized = String(contentType || "").toLowerCase().split(";")[0].trim();
+  const extension = path.extname(pathname || "").toLowerCase();
+
+  if (!normalized) return isExpectedMediaExtension(kind, extension);
+  if (normalized.startsWith(`${kind}/`)) return true;
+
+  const genericBinary = ["application/octet-stream", "binary/octet-stream"].includes(normalized);
+  return genericBinary && isExpectedMediaExtension(kind, extension);
+}
+
+function isExpectedMediaExtension(kind, extension) {
+  const videoExtensions = new Set([".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"]);
+  const audioExtensions = new Set([".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"]);
+  return kind === "video" ? videoExtensions.has(extension) : audioExtensions.has(extension);
+}
+
+function capitalize(value) {
+  const text = String(value || "");
+  return text ? `${text[0].toUpperCase()}${text.slice(1)}` : "";
+}
+
+function normalizeProxyUrl(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || ["0", "false", "no", "none", "off"].includes(trimmed.toLowerCase())) {
+    return null;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `socks5://${trimmed}`;
+}
+
+function publicProxyUrl(value) {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value);
+    if (url.username) url.username = "****";
+    if (url.password) url.password = "****";
+    return url.toString();
+  } catch {
+    return String(value).replace(/\/\/[^/@]+@/, "//****@");
+  }
+}
+
 function parseJson(text) {
   if (!text) return null;
   try {
@@ -459,12 +648,21 @@ function parseJson(text) {
 }
 
 function extractArkMessage(data, fallback, status) {
-  if (data?.error?.message) return data.error.message;
-  if (data?.message) return data.message;
-  if (data?.msg) return data.msg;
-  if (data?.error) return typeof data.error === "string" ? data.error : JSON.stringify(data.error);
-  if (fallback) return fallback.slice(0, 500);
+  if (data?.error?.message) return decorateArkMessage(data.error.message);
+  if (data?.message) return decorateArkMessage(data.message);
+  if (data?.msg) return decorateArkMessage(data.msg);
+  if (data?.error) return decorateArkMessage(typeof data.error === "string" ? data.error : JSON.stringify(data.error));
+  if (fallback) return decorateArkMessage(fallback.slice(0, 500));
   return `Volcengine Ark returned HTTP ${status}.`;
+}
+
+function decorateArkMessage(message) {
+  const text = String(message || "");
+  if (/content\[\d+\]\.video_url/i.test(text) && /timeout while fetching resource/i.test(text)) {
+    return `${text} The video host is not reachable fast enough from Volcengine Ark. Rehost the MP4 on a stable public bucket or CDN that Ark can fetch, or upload it to Ark and use an asset:// ID.`;
+  }
+
+  return text;
 }
 
 function httpError(status, message, details = null) {

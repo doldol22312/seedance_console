@@ -420,12 +420,14 @@ h2 {
 }
 
 .paste-empty small,
-.image-chip small {
+.image-chip small,
+.media-chip small {
   color: var(--muted);
   font-size: 12px;
 }
 
-.image-chip {
+.image-chip,
+.media-chip {
   position: absolute;
   left: 8px;
   right: 46px;
@@ -441,18 +443,21 @@ h2 {
   backdrop-filter: blur(8px);
 }
 
-.image-chip strong {
+.image-chip strong,
+.media-chip strong {
   overflow: hidden;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.image-chip small {
+.image-chip small,
+.media-chip small {
   color: rgba(255, 255, 255, 0.72);
 }
 
-.image-clear {
+.image-clear,
+.media-clear {
   position: absolute;
   right: 8px;
   bottom: 8px;
@@ -464,6 +469,23 @@ h2 {
   color: #fff;
   border-color: rgba(255, 255, 255, 0.45);
   background: rgba(18, 20, 18, 0.78);
+}
+
+.media-card {
+  position: relative;
+  min-height: 150px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #121412;
+  overflow: hidden;
+}
+
+.media-card video {
+  display: block;
+  width: 100%;
+  height: 150px;
+  object-fit: contain;
+  background: #121412;
 }
 
 .image-actions {

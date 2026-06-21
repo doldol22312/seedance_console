@@ -17,9 +17,11 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
-    "vite": "^7.1.0",
+    "node-fetch": "^3.3.2",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "socks-proxy-agent": "^8.0.5",
+    "vite": "^7.1.0"
   },
   "devDependencies": {}
 }

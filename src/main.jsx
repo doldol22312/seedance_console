@@ -42,6 +42,9 @@ const STATUS_CLASS = {
   cancelled: "bad"
 };
 
+const MAX_PASTED_IMAGE_BYTES = 15 * 1024 * 1024;
+const MAX_PASTED_VIDEO_BYTES = 22 * 1024 * 1024;
+
 function App() {
   const [config, setConfig] = React.useState(null);
   const [keysInput, setKeysInput] = React.useState("");
@@ -52,6 +55,7 @@ function App() {
   const [tasks, setTasks] = React.useState([]);
   const [lookupId, setLookupId] = React.useState("");
   const [imageAsset, setImageAsset] = React.useState(null);
+  const [videoAsset, setVideoAsset] = React.useState(null);
   const [form, setForm] = React.useState({
     model: MODELS[0].id,
     prompt:
@@ -146,6 +150,14 @@ function App() {
 
   async function submitGenerate(event) {
     event.preventDefault();
+    if (isDataVideoUrl(form.videoUrl)) {
+      setNotice({
+        type: "bad",
+        text: "Pasted video files need a public URL or asset:// ID before Seedance can use them."
+      });
+      return;
+    }
+
     setGenerateBusy(true);
     setNotice(null);
 
@@ -193,34 +205,48 @@ function App() {
   }
 
   async function handlePaste(event) {
-    const file = getImageFileFromClipboard(event.clipboardData);
+    const file = getMediaFileFromClipboard(event.clipboardData);
     if (!file) return;
 
     event.preventDefault();
-    await attachImageFile(file);
+    await attachMediaFile(file);
   }
 
-  async function readClipboardImage() {
+  async function readClipboardMedia(kind) {
     if (!navigator.clipboard?.read) {
-      setNotice({ type: "bad", text: "This browser only supports Ctrl+V paste for images." });
+      setNotice({ type: "bad", text: `This browser only supports Ctrl+V paste for ${kind}s.` });
       return;
     }
 
     try {
       const items = await navigator.clipboard.read();
       for (const item of items) {
-        const imageType = item.types.find((type) => type.startsWith("image/"));
-        if (!imageType) continue;
+        const mediaType = item.types.find((type) => type.startsWith(`${kind}/`));
+        if (!mediaType) continue;
 
-        const blob = await item.getType(imageType);
-        await attachImageFile(new File([blob], `clipboard.${imageType.split("/")[1] || "png"}`, { type: imageType }));
+        const blob = await item.getType(mediaType);
+        await attachMediaFile(new File([blob], `clipboard.${extensionForType(mediaType)}`, { type: mediaType }));
         return;
       }
 
-      setNotice({ type: "bad", text: "Clipboard does not contain an image." });
+      setNotice({ type: "bad", text: `Clipboard does not contain a ${kind}.` });
     } catch (error) {
-      setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
+      setNotice({ type: "bad", text: error.message || `Could not read clipboard ${kind}.` });
     }
+  }
+
+  async function attachMediaFile(file) {
+    if (file?.type?.startsWith("image/")) {
+      await attachImageFile(file);
+      return;
+    }
+
+    if (file?.type?.startsWith("video/")) {
+      await attachVideoFile(file);
+      return;
+    }
+
+    setNotice({ type: "bad", text: "Paste an image or video file." });
   }
 
   async function attachImageFile(file) {
@@ -229,12 +255,12 @@ function App() {
       return;
     }
 
-    if (file.size > 15 * 1024 * 1024) {
+    if (file.size > MAX_PASTED_IMAGE_BYTES) {
       setNotice({ type: "bad", text: "Image is larger than 15 MB." });
       return;
     }
 
-    const dataUrl = await fileToDataUrl(file);
+    const dataUrl = await fileToDataUrl(file, "image");
     setImageAsset({
       name: file.name || "clipboard image",
       size: file.size,
@@ -245,9 +271,36 @@ function App() {
     setNotice({ type: "good", text: "Clipboard image attached" });
   }
 
+  async function attachVideoFile(file) {
+    if (!file?.type?.startsWith("video/")) {
+      setNotice({ type: "bad", text: "Paste a video file." });
+      return;
+    }
+
+    if (file.size > MAX_PASTED_VIDEO_BYTES) {
+      setNotice({ type: "bad", text: "Video is larger than 22 MB. Use a public URL for larger clips." });
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file, "video");
+    setVideoAsset({
+      name: file.name || "clipboard video",
+      size: file.size,
+      type: file.type,
+      preview: dataUrl
+    });
+    updateForm("videoUrl", dataUrl);
+    setNotice({ type: "warn", text: "Clipboard video preview attached. Use a public URL or asset:// ID to generate from it." });
+  }
+
   function clearImageAsset() {
     setImageAsset(null);
     updateForm("imageUrl", "");
+  }
+
+  function clearVideoAsset() {
+    setVideoAsset(null);
+    updateForm("videoUrl", "");
   }
 
   return (
@@ -367,7 +420,7 @@ function App() {
                 )}
               </div>
               <div className="image-actions">
-                <button type="button" onClick={readClipboardImage}>
+                <button type="button" onClick={() => readClipboardMedia("image")}>
                   <Clipboard size={16} />
                   Paste
                 </button>
@@ -381,10 +434,35 @@ function App() {
                 />
               </div>
             </div>
-            <label className="field">
-              <span>Video URL</span>
-              <input value={form.videoUrl} onChange={(event) => updateForm("videoUrl", event.target.value)} placeholder="https://..." />
-            </label>
+            <div className="field video-field">
+              <span>Video</span>
+              {videoAsset && (
+                <div className="media-card">
+                  <video src={videoAsset.preview} controls muted preload="metadata" />
+                  <div className="media-chip">
+                    <strong>{videoAsset.name}</strong>
+                    <small>{formatBytes(videoAsset.size)} · {videoAsset.type}</small>
+                  </div>
+                  <button className="media-clear" type="button" onClick={clearVideoAsset} aria-label="Clear pasted video">
+                    <X size={15} />
+                  </button>
+                </div>
+              )}
+              <div className="image-actions media-actions">
+                <button type="button" onClick={() => readClipboardMedia("video")}>
+                  <Clipboard size={16} />
+                  Paste
+                </button>
+                <input
+                  value={form.videoUrl.startsWith("data:video/") ? "clipboard video attached" : form.videoUrl}
+                  onChange={(event) => {
+                    setVideoAsset(null);
+                    updateForm("videoUrl", event.target.value);
+                  }}
+                  placeholder="https://..."
+                />
+              </div>
+            </div>
             <label className="field">
               <span>Audio URL</span>
               <input value={form.audioUrl} onChange={(event) => updateForm("audioUrl", event.target.value)} placeholder="https://..." />
@@ -554,19 +632,34 @@ function normalizeTask(data, fallbackStatus) {
   };
 }
 
-function getImageFileFromClipboard(clipboardData) {
+function getMediaFileFromClipboard(clipboardData) {
   const items = Array.from(clipboardData?.items || []);
-  const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));
-  return imageItem?.getAsFile() || null;
+  const fileItems = items.filter((item) => item.kind === "file");
+  const videoItem = fileItems.find((item) => item.type.startsWith("video/"));
+  const imageItem = fileItems.find((item) => item.type.startsWith("image/"));
+  return (videoItem || imageItem)?.getAsFile() || null;
 }
 
-function fileToDataUrl(file) {
+function fileToDataUrl(file, label = "file") {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Could not read pasted image."));
+    reader.onerror = () => reject(new Error(`Could not read pasted ${label}.`));
     reader.readAsDataURL(file);
   });
+}
+
+function extensionForType(type) {
+  const subtype = String(type || "").split("/")[1]?.split(";")[0];
+  if (!subtype) return "bin";
+  if (subtype === "quicktime") return "mov";
+  if (subtype === "x-msvideo") return "avi";
+  if (subtype.includes("mp4")) return "mp4";
+  return subtype.replace(/[^a-z0-9]+/gi, "") || "bin";
+}
+
+function isDataVideoUrl(value) {
+  return String(value || "").trim().toLowerCase().startsWith("data:video/");
 }
 
 function formatBytes(bytes) {
