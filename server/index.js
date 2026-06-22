@@ -1,13 +1,19 @@
 import express from "express";
 import "dotenv/config";
-import fetch from "node-fetch";
+import fetch, { File, FormData } from "node-fetch";
+import { execFile } from "node:child_process";
+import { constants as fsConstants, createWriteStream, existsSync, readFileSync } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { SocksProxyAgent } from "socks-proxy-agent";
 
 const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const DEFAULT_PROXY_URL = "";
+const DEFAULT_LITTERBOX_UPLOAD_URL = "https://litterbox.catbox.moe/resources/internals/api.php";
 const PORT = Number(process.env.PORT || 8787);
 const BASE_URL = stripTrailingSlash(process.env.ARK_BASE_URL || DEFAULT_BASE_URL);
 const PROXY_URL = normalizeProxyUrl(process.env.ARK_PROXY_URL ?? DEFAULT_PROXY_URL);
@@ -17,6 +23,15 @@ const MEDIA_PREFLIGHT_TIMEOUT_MS = Number(process.env.MEDIA_PREFLIGHT_TIMEOUT_MS
 const MEDIA_PREFLIGHT_BYTES = Number(process.env.MEDIA_PREFLIGHT_BYTES || 2048);
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "64mb";
 const KEY_COOLDOWN_MS = Number(process.env.ARK_KEY_COOLDOWN_MS || 60_000);
+const MAX_REFERENCE_IMAGES = 9;
+const LITTERBOX_UPLOAD_URL = process.env.LITTERBOX_UPLOAD_URL || DEFAULT_LITTERBOX_UPLOAD_URL;
+const LITTERBOX_EXPIRY = normalizeLitterboxExpiry(process.env.LITTERBOX_EXPIRY || "12h");
+const LITTERBOX_UPLOAD_TIMEOUT_MS = Number(process.env.LITTERBOX_UPLOAD_TIMEOUT_MS || 60_000);
+const MAX_LITTERBOX_VIDEO_BYTES = Number(process.env.LITTERBOX_MAX_VIDEO_BYTES || 22 * 1024 * 1024);
+const AUTOSAVE_SETTINGS_PATH = path.resolve(process.env.AUTOSAVE_SETTINGS_PATH || ".autosave-settings.json");
+const AUTOSAVE_DOWNLOAD_TIMEOUT_MS = Number(process.env.AUTOSAVE_DOWNLOAD_TIMEOUT_MS || 300_000);
+const FOLDER_PICKER_TIMEOUT_MS = Number(process.env.FOLDER_PICKER_TIMEOUT_MS || 300_000);
+const execFileAsync = promisify(execFile);
 
 const app = express();
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
@@ -29,6 +44,8 @@ const pool = createKeyPool({
 pool.replace(parseKeys(process.env.ARK_API_KEYS || process.env.ARK_API_KEY || ""));
 
 const taskKeyMap = new Map();
+const autosaveTaskMap = new Map();
+let autosaveSettings = loadAutosaveSettings();
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -38,6 +55,11 @@ app.get("/api/health", (_req, res) => {
     timeoutMs: REQUEST_TIMEOUT_MS,
     mediaPreflightTimeoutMs: MEDIA_PREFLIGHT_TIMEOUT_MS,
     requestBodyLimit: REQUEST_BODY_LIMIT,
+    litterboxExpiry: LITTERBOX_EXPIRY,
+    autosave: {
+      enabled: autosaveSettings.enabled,
+      directory: autosaveSettings.directory
+    },
     keyCount: pool.summary().length,
     activeKeys: pool.summary().filter((key) => key.usable).length
   });
@@ -98,6 +120,37 @@ app.delete("/api/keys/:id", (req, res) => {
   res.json({ keys: pool.summary(), pointer: pool.pointer() });
 });
 
+app.get("/api/autosave", (_req, res) => {
+  res.json(publicAutosaveSettings());
+});
+
+app.put("/api/autosave", async (req, res) => {
+  try {
+    const settings = await updateAutosaveSettings(req.body || {});
+    res.json(settings);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/api/autosave/browse-folder", async (req, res) => {
+  try {
+    const directory = await pickAutosaveDirectory(req.body?.directory || autosaveSettings.directory);
+    res.json({ directory });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.post("/api/uploads/reference-video", async (req, res) => {
+  try {
+    const upload = await uploadReferenceVideoToLitterbox(req.body || {});
+    res.json(upload);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 app.post("/api/generate", async (req, res) => {
   try {
     const payload = await buildCreatePayload(req.body);
@@ -121,7 +174,8 @@ app.post("/api/generate", async (req, res) => {
 
     res.json({
       ...result.response,
-      key: publicKeyView(result.credential)
+      key: publicKeyView(result.credential),
+      autosave: maybeAutosaveTask(taskId, result.response)
     });
   } catch (error) {
     sendError(res, error);
@@ -148,7 +202,8 @@ app.get("/api/tasks/:id", async (req, res) => {
 
     res.json({
       ...result.response,
-      key: publicKeyView(result.credential)
+      key: publicKeyView(result.credential),
+      autosave: maybeAutosaveTask(req.params.id, result.response)
     });
   } catch (error) {
     sendError(res, error);
@@ -320,6 +375,7 @@ function createKeyPool({ baseUrl, timeoutMs, cooldownMs }) {
 async function buildCreatePayload(input = {}) {
   const prompt = String(input.prompt || "").trim();
   const imageUrl = normalizeMediaReference(input.imageUrl);
+  const referenceImages = normalizeMediaReferences(input.referenceImages || input.referenceImageUrls || input.referenceImageUrl);
   const audioUrl = normalizeMediaReference(input.audioUrl);
   const videoUrl = normalizeMediaReference(input.videoUrl);
   const model = String(input.model || "doubao-seedance-2-0-fast-260128").trim();
@@ -334,7 +390,19 @@ async function buildCreatePayload(input = {}) {
     content.push({
       type: "image_url",
       image_url: { url: imageUrl },
-      ...(hasReferenceMedia ? { role: "reference_image" } : {})
+      ...(hasReferenceMedia && !referenceImages.length ? { role: "reference_image" } : {})
+    });
+  }
+
+  if (referenceImages.length > MAX_REFERENCE_IMAGES) {
+    throw httpError(400, `Seedance 2.0 supports up to ${MAX_REFERENCE_IMAGES} reference images.`);
+  }
+
+  for (const referenceImageUrl of referenceImages) {
+    content.push({
+      type: "image_url",
+      image_url: { url: referenceImageUrl },
+      role: "reference_image"
     });
   }
 
@@ -490,6 +558,325 @@ function normalizeMediaReference(value) {
   const match = trimmed.match(/\b(?:https?:\/\/|asset:\/\/)\S+/i);
   const reference = match ? match[0] : trimmed;
   return reference.replace(/[)\].,;'"`]+$/g, "");
+}
+
+function normalizeMediaReferences(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "")
+        .split(/\n+/)
+        .map((item) => item.trim());
+
+  return [...new Set(values.map((item) => normalizeMediaReference(item?.url || item)).filter(Boolean))];
+}
+
+function loadAutosaveSettings() {
+  const defaults = {
+    enabled: parseBoolean(process.env.AUTOSAVE_ENABLED, false),
+    directory: normalizeDirectoryPath(process.env.AUTOSAVE_DIR || "")
+  };
+
+  if (!existsSync(AUTOSAVE_SETTINGS_PATH)) {
+    return normalizeAutosaveSettings(defaults);
+  }
+
+  try {
+    const saved = parseJson(readFileSync(AUTOSAVE_SETTINGS_PATH, "utf8")) || {};
+    return normalizeAutosaveSettings({ ...defaults, ...saved });
+  } catch {
+    return normalizeAutosaveSettings(defaults);
+  }
+}
+
+function publicAutosaveSettings() {
+  return {
+    enabled: autosaveSettings.enabled,
+    directory: autosaveSettings.directory,
+    settingsPath: AUTOSAVE_SETTINGS_PATH
+  };
+}
+
+async function updateAutosaveSettings(input) {
+  const next = normalizeAutosaveSettings(input);
+
+  if (next.enabled && !next.directory) {
+    throw httpError(400, "Choose a folder before enabling autosave.");
+  }
+
+  if (next.enabled) {
+    await ensureWritableDirectory(next.directory);
+  }
+
+  autosaveSettings = next;
+  await fs.writeFile(AUTOSAVE_SETTINGS_PATH, `${JSON.stringify(autosaveSettings, null, 2)}\n`);
+  return publicAutosaveSettings();
+}
+
+function normalizeAutosaveSettings(input = {}) {
+  return {
+    enabled: parseBoolean(input.enabled, false),
+    directory: normalizeDirectoryPath(input.directory)
+  };
+}
+
+function normalizeDirectoryPath(value) {
+  const trimmed = String(value || "").trim().replace(/^["']|["']$/g, "");
+  return trimmed ? path.resolve(trimmed) : "";
+}
+
+async function ensureWritableDirectory(directory) {
+  try {
+    await fs.mkdir(directory, { recursive: true });
+    await fs.access(directory, fsConstants.W_OK);
+  } catch (error) {
+    throw httpError(400, `Autosave folder is not writable: ${error.message}`);
+  }
+}
+
+async function pickAutosaveDirectory(initialDirectory) {
+  if (process.platform !== "win32") {
+    throw httpError(501, "The folder picker is only available on Windows in this local app.");
+  }
+
+  const encodedInitialDirectory = Buffer.from(normalizeDirectoryPath(initialDirectory), "utf8").toString("base64");
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+$selected = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${encodedInitialDirectory}"))
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Choose a folder for Seedance autosave"
+$dialog.ShowNewFolderButton = $true
+if ($selected -and (Test-Path -LiteralPath $selected)) {
+  $dialog.SelectedPath = $selected
+}
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::Out.Write($dialog.SelectedPath)
+}
+`;
+  const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
+      {
+        timeout: FOLDER_PICKER_TIMEOUT_MS,
+        windowsHide: false
+      }
+    );
+    return normalizeDirectoryPath(stdout);
+  } catch (error) {
+    if (error.killed || error.signal === "SIGTERM") {
+      throw httpError(504, "Folder picker timed out.");
+    }
+    throw httpError(500, `Could not open folder picker: ${error.message}`);
+  }
+}
+
+function maybeAutosaveTask(taskId, task) {
+  const videoUrl = extractGeneratedVideoUrl(task);
+  const existing = autosaveTaskMap.get(taskId);
+
+  if (!autosaveSettings.enabled || !autosaveSettings.directory || !videoUrl) {
+    return existing ? publicAutosaveState(existing) : null;
+  }
+
+  if (existing?.url === videoUrl && ["saving", "saved"].includes(existing.status)) {
+    return publicAutosaveState(existing);
+  }
+
+  const filePath = path.join(autosaveSettings.directory, generatedVideoFileName(taskId, videoUrl));
+  const state = {
+    status: "saving",
+    path: filePath,
+    url: videoUrl,
+    error: null,
+    savedAt: null
+  };
+
+  autosaveTaskMap.set(taskId, state);
+  saveGeneratedVideo(state).catch((error) => {
+    state.status = "failed";
+    state.error = error.publicMessage || error.message || "Autosave failed.";
+  });
+
+  return publicAutosaveState(state);
+}
+
+async function saveGeneratedVideo(state) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTOSAVE_DOWNLOAD_TIMEOUT_MS);
+  const tempPath = `${state.path}.part`;
+
+  try {
+    await fs.mkdir(path.dirname(state.path), { recursive: true });
+    const response = await fetch(state.url, {
+      headers: {
+        Accept: "video/*,*/*;q=0.8"
+      },
+      agent: PROXY_AGENT || undefined,
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw httpError(502, `Autosave download returned HTTP ${response.status}.`);
+    }
+
+    if (!response.body) {
+      throw httpError(502, "Autosave download returned no response body.");
+    }
+
+    await pipeline(response.body, createWriteStream(tempPath));
+    await fs.rename(tempPath, state.path);
+    state.status = "saved";
+    state.savedAt = new Date().toISOString();
+    state.error = null;
+  } catch (error) {
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+    if (error.name === "AbortError") {
+      throw httpError(504, `Autosave download did not finish within ${Math.round(AUTOSAVE_DOWNLOAD_TIMEOUT_MS / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function publicAutosaveState(state) {
+  if (!state) return null;
+
+  return {
+    status: state.status,
+    path: state.path,
+    fileName: state.path ? path.basename(state.path) : "",
+    error: state.error,
+    savedAt: state.savedAt
+  };
+}
+
+function extractGeneratedVideoUrl(task) {
+  const video = task?.content?.video_url;
+  if (typeof video === "string") return video;
+  if (video?.url) return String(video.url);
+  return "";
+}
+
+function generatedVideoFileName(taskId, videoUrl) {
+  const safeTaskId = String(taskId || randomUUID())
+    .replace(/[^a-z0-9_-]+/gi, "_")
+    .slice(0, 96);
+  const extension = videoExtensionFromUrl(videoUrl);
+  return `seedance-${safeTaskId}${extension}`;
+}
+
+function videoExtensionFromUrl(value) {
+  try {
+    const extension = path.extname(new URL(value).pathname).toLowerCase();
+    return isExpectedMediaExtension("video", extension) ? extension : ".mp4";
+  } catch {
+    return ".mp4";
+  }
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+async function uploadReferenceVideoToLitterbox(input) {
+  const { bytes, mimeType } = parseVideoDataUrl(input.dataUrl);
+
+  if (bytes.length > MAX_LITTERBOX_VIDEO_BYTES) {
+    throw httpError(400, `Video is larger than ${formatMb(MAX_LITTERBOX_VIDEO_BYTES)} MB.`);
+  }
+
+  const fileName = safeUploadFileName(input.name, mimeType);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LITTERBOX_UPLOAD_TIMEOUT_MS);
+  const form = new FormData();
+  form.set("reqtype", "fileupload");
+  form.set("time", LITTERBOX_EXPIRY);
+  form.set("fileToUpload", new File([bytes], fileName, { type: mimeType }));
+
+  try {
+    const response = await fetch(LITTERBOX_UPLOAD_URL, {
+      method: "POST",
+      body: form,
+      signal: controller.signal
+    });
+    const text = (await response.text()).trim();
+
+    if (!response.ok) {
+      throw httpError(502, `Litterbox upload returned HTTP ${response.status}.`);
+    }
+
+    if (!/^https?:\/\/\S+$/i.test(text)) {
+      throw httpError(502, `Litterbox upload failed: ${text.slice(0, 240) || "empty response"}`);
+    }
+
+    return {
+      url: text,
+      expires: LITTERBOX_EXPIRY
+    };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw httpError(504, `Litterbox upload did not finish within ${Math.round(LITTERBOX_UPLOAD_TIMEOUT_MS / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseVideoDataUrl(value) {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(String(value || ""));
+  if (!match) {
+    throw httpError(400, "Reference video upload requires a pasted video data URL.");
+  }
+
+  const mimeType = match[1].toLowerCase();
+  if (!mimeType.startsWith("video/")) {
+    throw httpError(400, "Reference video upload only accepts video files.");
+  }
+
+  const bytes = Buffer.from(match[2], "base64");
+  if (!bytes.length) {
+    throw httpError(400, "Reference video upload received an empty file.");
+  }
+
+  return { bytes, mimeType };
+}
+
+function safeUploadFileName(value, mimeType) {
+  const extension = extensionForMimeType(mimeType);
+  const fallback = `reference-video.${extension}`;
+  const baseName = path.basename(String(value || fallback)).replace(/[^a-z0-9._-]+/gi, "_");
+  const trimmed = baseName.replace(/^_+|_+$/g, "");
+  const fileName = trimmed || fallback;
+
+  return path.extname(fileName) ? fileName : `${fileName}.${extension}`;
+}
+
+function extensionForMimeType(mimeType) {
+  const subtype = String(mimeType || "").split("/")[1]?.split(";")[0]?.toLowerCase();
+  if (subtype === "quicktime") return "mov";
+  if (subtype === "x-msvideo") return "avi";
+  if (subtype?.includes("mp4")) return "mp4";
+  return subtype?.replace(/[^a-z0-9]+/g, "") || "mp4";
+}
+
+function normalizeLitterboxExpiry(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const withUnit = /^\d+$/.test(normalized) ? `${normalized}h` : normalized;
+  const allowed = new Set(["1h", "12h", "24h", "72h"]);
+  return allowed.has(withUnit) ? withUnit : "12h";
+}
+
+function formatMb(bytes) {
+  return Math.round((bytes / 1024 / 1024) * 10) / 10;
 }
 
 async function validateRemoteMediaReference(value, kind) {

@@ -119,6 +119,12 @@ select:focus {
   text-transform: uppercase;
 }
 
+.brand-logo {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+
 h1,
 h2 {
   margin: 0;
@@ -186,6 +192,11 @@ h2 {
   background: var(--red-soft);
 }
 
+.notice.warn {
+  border-color: rgba(180, 122, 0, 0.45);
+  background: var(--yellow-soft);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(270px, 0.82fr) minmax(420px, 1.45fr) minmax(330px, 1fr);
@@ -249,6 +260,37 @@ h2 {
   display: grid;
   gap: 8px;
   padding: 14px;
+}
+
+.side-section {
+  display: grid;
+  gap: 10px;
+  margin: 0 14px;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.side-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.side-section-title h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.autosave-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.helper-text {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .key-row {
@@ -377,6 +419,23 @@ h2 {
   grid-row: span 2;
 }
 
+.reference-images-field {
+  grid-column: 1 / -1;
+}
+
+.field-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-heading small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .paste-zone {
   position: relative;
   display: grid;
@@ -488,10 +547,69 @@ h2 {
   background: #121412;
 }
 
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
+  gap: 8px;
+  min-height: 104px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.reference-grid.is-empty {
+  place-items: center;
+}
+
+.reference-tile {
+  position: relative;
+  aspect-ratio: 1;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #121412;
+}
+
+.reference-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.reference-tile button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.45);
+  background: rgba(18, 20, 18, 0.78);
+}
+
+.reference-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .image-actions {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 8px;
+}
+
+.reference-actions {
+  grid-template-columns: auto 1fr auto;
 }
 
 .toggles {
@@ -610,6 +728,33 @@ h2 {
   justify-self: start;
   min-height: 34px;
   padding: 0 10px;
+}
+
+.autosave-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.autosave-state.good {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.autosave-state.warn {
+  color: var(--yellow);
+  background: var(--yellow-soft);
+}
+
+.autosave-state.bad {
+  color: var(--red);
+  background: var(--red-soft);
 }
 
 .pending-box,

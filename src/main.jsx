@@ -4,10 +4,10 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
-  Clapperboard,
   Clipboard,
   Copy,
   Film,
+  FolderOpen,
   Gauge,
   ImagePlus,
   KeyRound,
@@ -44,6 +44,7 @@ const STATUS_CLASS = {
 
 const MAX_PASTED_IMAGE_BYTES = 15 * 1024 * 1024;
 const MAX_PASTED_VIDEO_BYTES = 22 * 1024 * 1024;
+const MAX_REFERENCE_IMAGES = 9;
 
 function App() {
   const [config, setConfig] = React.useState(null);
@@ -51,16 +52,26 @@ function App() {
   const [keys, setKeys] = React.useState([]);
   const [keysBusy, setKeysBusy] = React.useState(false);
   const [generateBusy, setGenerateBusy] = React.useState(false);
+  const [videoUploadBusy, setVideoUploadBusy] = React.useState(false);
+  const [folderPickerBusy, setFolderPickerBusy] = React.useState(false);
   const [notice, setNotice] = React.useState(null);
   const [tasks, setTasks] = React.useState([]);
   const [lookupId, setLookupId] = React.useState("");
   const [imageAsset, setImageAsset] = React.useState(null);
   const [videoAsset, setVideoAsset] = React.useState(null);
+  const videoUploadTokenRef = React.useRef(null);
+  const [referenceImageInput, setReferenceImageInput] = React.useState("");
+  const [autosave, setAutosave] = React.useState({
+    enabled: false,
+    directory: ""
+  });
+  const autosaveSaveTimerRef = React.useRef(null);
   const [form, setForm] = React.useState({
     model: MODELS[0].id,
     prompt:
       "A silver train crosses a flooded salt flat at dusk, reflections ripple under the wheels, controlled cinematic camera movement",
     imageUrl: "",
+    referenceImages: [],
     videoUrl: "",
     audioUrl: "",
     resolution: "720p",
@@ -73,6 +84,7 @@ function App() {
 
   React.useEffect(() => {
     refreshKeys();
+    refreshAutosave();
     api("/api/config")
       .then(setConfig)
       .catch((error) => setNotice({ type: "bad", text: error.message }));
@@ -85,7 +97,15 @@ function App() {
   }, [form.model, form.resolution]);
 
   React.useEffect(() => {
-    const active = tasks.filter((task) => ["queued", "running", "submitted"].includes(task.status));
+    return () => {
+      if (autosaveSaveTimerRef.current) {
+        window.clearTimeout(autosaveSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const active = tasks.filter((task) => ["queued", "running", "submitted"].includes(task.status) || task.autosave?.status === "saving");
     if (!active.length) return undefined;
 
     const timer = window.setInterval(() => {
@@ -148,8 +168,95 @@ function App() {
     setKeys(data.keys || []);
   }
 
+  async function refreshAutosave() {
+    try {
+      const data = await api("/api/autosave");
+      setAutosave({
+        enabled: Boolean(data.enabled),
+        directory: data.directory || ""
+      });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+    }
+  }
+
+  async function persistAutosaveSettings(next, options = {}) {
+    try {
+      const data = await api("/api/autosave", {
+        method: "PUT",
+        body: next
+      });
+      setAutosave({
+        enabled: Boolean(data.enabled),
+        directory: data.directory || ""
+      });
+      if (options.notice) {
+        setNotice({
+          type: data.enabled ? "good" : "warn",
+          text: data.enabled ? "Autosave settings updated." : "Autosave disabled."
+        });
+      }
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+      refreshAutosave();
+    }
+  }
+
+  function updateAutosave(name, value, options = {}) {
+    const nextSettings = { ...autosave, [name]: value };
+    setAutosave(nextSettings);
+
+    if (autosaveSaveTimerRef.current) {
+      window.clearTimeout(autosaveSaveTimerRef.current);
+    }
+
+    if (options.persist !== false) {
+      const save = () => persistAutosaveSettings(nextSettings, { notice: options.notice });
+      if (options.debounce) {
+        autosaveSaveTimerRef.current = window.setTimeout(save, 650);
+      } else {
+        save();
+      }
+    }
+  }
+
+  async function chooseAutosaveFolder() {
+    setFolderPickerBusy(true);
+    setNotice({ type: "warn", text: "Choose an autosave folder in the system dialog." });
+
+    try {
+      const data = await api("/api/autosave/browse-folder", {
+        method: "POST",
+        body: {
+          directory: autosave.directory
+        }
+      });
+
+      if (!data.directory) {
+        setNotice({ type: "warn", text: "Folder selection cancelled." });
+        return;
+      }
+
+      updateAutosave("directory", data.directory, { notice: true });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+    } finally {
+      setFolderPickerBusy(false);
+    }
+  }
+
   async function submitGenerate(event) {
     event.preventDefault();
+    if (videoUploadBusy) {
+      setNotice({ type: "warn", text: "Wait for the reference video upload to finish." });
+      return;
+    }
+
+    if (videoAsset && !form.videoUrl) {
+      setNotice({ type: "bad", text: "Reference video upload failed. Paste the video again or clear it." });
+      return;
+    }
+
     if (isDataVideoUrl(form.videoUrl)) {
       setNotice({
         type: "bad",
@@ -271,6 +378,27 @@ function App() {
     setNotice({ type: "good", text: "Clipboard image attached" });
   }
 
+  async function attachReferenceImageFile(file) {
+    if (!file?.type?.startsWith("image/")) {
+      setNotice({ type: "bad", text: "Paste an image file." });
+      return;
+    }
+
+    if (file.size > MAX_PASTED_IMAGE_BYTES) {
+      setNotice({ type: "bad", text: "Reference image is larger than 15 MB." });
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file, "reference image");
+    addReferenceImage({
+      url: dataUrl,
+      name: file.name || "clipboard image",
+      size: file.size,
+      type: file.type,
+      preview: dataUrl
+    });
+  }
+
   async function attachVideoFile(file) {
     if (!file?.type?.startsWith("video/")) {
       setNotice({ type: "bad", text: "Paste a video file." });
@@ -282,15 +410,56 @@ function App() {
       return;
     }
 
+    const uploadToken = `${Date.now()}-${Math.random()}`;
     const dataUrl = await fileToDataUrl(file, "video");
+    videoUploadTokenRef.current = uploadToken;
+    setVideoUploadBusy(true);
     setVideoAsset({
+      id: uploadToken,
       name: file.name || "clipboard video",
       size: file.size,
       type: file.type,
-      preview: dataUrl
+      preview: dataUrl,
+      uploadStatus: "uploading"
     });
-    updateForm("videoUrl", dataUrl);
-    setNotice({ type: "warn", text: "Clipboard video preview attached. Use a public URL or asset:// ID to generate from it." });
+    updateForm("videoUrl", "");
+    setNotice({ type: "warn", text: "Uploading reference video to Litterbox..." });
+
+    try {
+      const data = await api("/api/uploads/reference-video", {
+        method: "POST",
+        body: {
+          dataUrl,
+          name: file.name || "clipboard-video",
+          type: file.type
+        }
+      });
+
+      if (videoUploadTokenRef.current !== uploadToken) return;
+
+      setVideoAsset((current) =>
+        current?.id === uploadToken
+          ? {
+              ...current,
+              url: data.url,
+              expires: data.expires,
+              uploadStatus: "ready"
+            }
+          : current
+      );
+      updateForm("videoUrl", data.url);
+      setNotice({ type: "good", text: `Reference video uploaded to Litterbox (${data.expires})` });
+    } catch (error) {
+      if (videoUploadTokenRef.current !== uploadToken) return;
+
+      setVideoAsset((current) => (current?.id === uploadToken ? { ...current, uploadStatus: "failed" } : current));
+      updateForm("videoUrl", "");
+      setNotice({ type: "bad", text: error.message || "Could not upload reference video to Litterbox." });
+    } finally {
+      if (videoUploadTokenRef.current === uploadToken) {
+        setVideoUploadBusy(false);
+      }
+    }
   }
 
   function clearImageAsset() {
@@ -298,7 +467,76 @@ function App() {
     updateForm("imageUrl", "");
   }
 
+  function addReferenceImage(reference) {
+    const url = typeof reference === "string" ? reference.trim() : String(reference?.url || "").trim();
+    if (!url) return false;
+
+    let added = false;
+    setForm((current) => {
+      const currentReferences = Array.isArray(current.referenceImages) ? current.referenceImages : [];
+      if (currentReferences.length >= MAX_REFERENCE_IMAGES) {
+        setNotice({ type: "bad", text: `Seedance supports up to ${MAX_REFERENCE_IMAGES} reference images.` });
+        return current;
+      }
+
+      const duplicate = currentReferences.some((item) => String(item?.url || item).trim() === url);
+      if (duplicate) {
+        setNotice({ type: "warn", text: "Reference image is already attached." });
+        return current;
+      }
+
+      added = true;
+      const item =
+        typeof reference === "string"
+          ? { url, name: referenceLabel(url), preview: url }
+          : { ...reference, url, preview: reference.preview || url };
+
+      return {
+        ...current,
+        referenceImages: [...currentReferences, item]
+      };
+    });
+
+    if (added) {
+      setNotice({ type: "good", text: "Reference image attached" });
+    }
+    return added;
+  }
+
+  function addReferenceImageUrl() {
+    if (addReferenceImage(referenceImageInput)) {
+      setReferenceImageInput("");
+    }
+  }
+
+  function removeReferenceImage(index) {
+    setForm((current) => ({
+      ...current,
+      referenceImages: (Array.isArray(current.referenceImages) ? current.referenceImages : []).filter((_, itemIndex) => itemIndex !== index)
+    }));
+  }
+
+  async function pasteReferenceImage() {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const mediaType = item.types.find((type) => type.startsWith("image/"));
+        if (!mediaType) continue;
+
+        const blob = await item.getType(mediaType);
+        await attachReferenceImageFile(new File([blob], `reference.${extensionForType(mediaType)}`, { type: mediaType }));
+        return;
+      }
+
+      setNotice({ type: "bad", text: "Clipboard does not contain an image." });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
+    }
+  }
+
   function clearVideoAsset() {
+    videoUploadTokenRef.current = null;
+    setVideoUploadBusy(false);
     setVideoAsset(null);
     updateForm("videoUrl", "");
   }
@@ -308,7 +546,7 @@ function App() {
       <header className="topbar">
         <div>
           <div className="eyebrow">
-            <Clapperboard size={16} />
+            <img className="brand-logo" src="/bytedance-color.svg" alt="" />
             Volcengine Ark
           </div>
           <h1>Seedance Console</h1>
@@ -322,7 +560,7 @@ function App() {
 
       {notice && (
         <div className={`notice ${notice.type}`}>
-          {notice.type === "bad" ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+          {notice.type === "good" ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
           <span>{notice.text}</span>
         </div>
       )}
@@ -369,6 +607,30 @@ function App() {
               <div className="empty-state">No active keys</div>
             )}
           </div>
+
+          <section className="side-section autosave-settings">
+            <div className="side-section-title">
+              <FolderOpen size={17} />
+              <h3>Autosave</h3>
+            </div>
+            <Toggle label="Save videos" checked={autosave.enabled} onChange={(value) => updateAutosave("enabled", value, { notice: true })} />
+            <div className="field">
+              <span>Folder</span>
+              <div className="autosave-folder-row">
+                <input
+                  value={autosave.directory}
+                  onChange={(event) => updateAutosave("directory", event.target.value, { debounce: true })}
+                  placeholder="C:\Users\agalq\Videos\Seedance"
+                  disabled={folderPickerBusy}
+                />
+                <button type="button" onClick={chooseAutosaveFolder} disabled={folderPickerBusy}>
+                  {folderPickerBusy ? <Loader2 className="spin" size={16} /> : <FolderOpen size={16} />}
+                  Choose
+                </button>
+              </div>
+            </div>
+            <small className="helper-text">Settings save automatically. Completed videos save after a poll returns the generated URL.</small>
+          </section>
         </aside>
 
         <form className="panel composer" onSubmit={submitGenerate} onPaste={handlePaste}>
@@ -441,7 +703,12 @@ function App() {
                   <video src={videoAsset.preview} controls muted preload="metadata" />
                   <div className="media-chip">
                     <strong>{videoAsset.name}</strong>
-                    <small>{formatBytes(videoAsset.size)} · {videoAsset.type}</small>
+                    <small>
+                      {formatBytes(videoAsset.size)} · {videoAsset.type}
+                      {videoAsset.uploadStatus === "uploading" ? " · uploading" : ""}
+                      {videoAsset.uploadStatus === "ready" ? ` · Litterbox ${videoAsset.expires}` : ""}
+                      {videoAsset.uploadStatus === "failed" ? " · upload failed" : ""}
+                    </small>
                   </div>
                   <button className="media-clear" type="button" onClick={clearVideoAsset} aria-label="Clear pasted video">
                     <X size={15} />
@@ -449,18 +716,65 @@ function App() {
                 </div>
               )}
               <div className="image-actions media-actions">
-                <button type="button" onClick={() => readClipboardMedia("video")}>
-                  <Clipboard size={16} />
+                <button type="button" onClick={() => readClipboardMedia("video")} disabled={videoUploadBusy}>
+                  {videoUploadBusy ? <Loader2 className="spin" size={16} /> : <Clipboard size={16} />}
                   Paste
                 </button>
                 <input
-                  value={form.videoUrl.startsWith("data:video/") ? "clipboard video attached" : form.videoUrl}
+                  value={videoUploadBusy ? "uploading to Litterbox..." : form.videoUrl}
+                  disabled={videoUploadBusy}
                   onChange={(event) => {
+                    videoUploadTokenRef.current = null;
+                    setVideoUploadBusy(false);
                     setVideoAsset(null);
                     updateForm("videoUrl", event.target.value);
                   }}
                   placeholder="https://..."
                 />
+              </div>
+            </div>
+            <div className="field reference-images-field">
+              <div className="field-heading">
+                <span>Reference Images</span>
+                <small>{form.referenceImages.length}/{MAX_REFERENCE_IMAGES}</small>
+              </div>
+              <div className={`reference-grid ${form.referenceImages.length ? "" : "is-empty"}`}>
+                {form.referenceImages.length ? (
+                  form.referenceImages.map((reference, index) => (
+                    <div className="reference-tile" key={`${reference.url}-${index}`}>
+                      <img src={reference.preview || reference.url} alt={`Reference ${index + 1}`} />
+                      <button type="button" onClick={() => removeReferenceImage(index)} aria-label="Remove reference image">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <div className="reference-empty">
+                    <ImagePlus size={20} />
+                    <span>Add up to 9 reference images</span>
+                  </div>
+                )}
+              </div>
+              <div className="image-actions reference-actions">
+                <button type="button" onClick={pasteReferenceImage}>
+                  <Clipboard size={16} />
+                  Paste
+                </button>
+                <input
+                  value={referenceImageInput}
+                  onChange={(event) => setReferenceImageInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addReferenceImageUrl();
+                    }
+                  }}
+                  placeholder="https://... or asset://..."
+                />
+                <button type="button" onClick={addReferenceImageUrl}>
+                  <ImagePlus size={16} />
+                  Add
+                </button>
               </div>
             </div>
             <label className="field">
@@ -508,9 +822,9 @@ function App() {
             </div>
           </div>
 
-          <button className="launch-button" type="submit" disabled={generateBusy}>
-            {generateBusy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            Generate
+          <button className="launch-button" type="submit" disabled={generateBusy || videoUploadBusy}>
+            {generateBusy || videoUploadBusy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
+            {videoUploadBusy ? "Uploading video" : "Generate"}
           </button>
         </form>
 
@@ -604,6 +918,7 @@ function TaskCard({ task, onPoll }) {
             <Copy size={14} />
             Copy URL
           </button>
+          {task.autosave && <AutosaveStatus autosave={task.autosave} />}
         </div>
       ) : (
         <div className="pending-box">
@@ -613,6 +928,25 @@ function TaskCard({ task, onPoll }) {
       )}
     </article>
   );
+}
+
+function AutosaveStatus({ autosave }) {
+  const status = autosave.status || "saving";
+  const isSaved = status === "saved";
+  const isFailed = status === "failed";
+
+  return (
+    <div className={`autosave-state ${isSaved ? "good" : isFailed ? "bad" : "warn"}`}>
+      {isSaved ? <CheckCircle2 size={15} /> : isFailed ? <AlertTriangle size={15} /> : <Loader2 className="spin" size={15} />}
+      <span>{autosaveStatusText(autosave)}</span>
+    </div>
+  );
+}
+
+function autosaveStatusText(autosave) {
+  if (autosave.status === "saved") return `Saved to ${autosave.path}`;
+  if (autosave.status === "failed") return `Autosave failed: ${autosave.error || "unknown error"}`;
+  return `Saving to ${autosave.path}`;
 }
 
 function normalizeTask(data, fallbackStatus) {
@@ -628,6 +962,7 @@ function normalizeTask(data, fallbackStatus) {
     duration: data.duration,
     framespersecond: data.framespersecond,
     usage: data.usage,
+    autosave: data.autosave || null,
     error: data.error?.message || data.error
   };
 }
@@ -660,6 +995,26 @@ function extensionForType(type) {
 
 function isDataVideoUrl(value) {
   return String(value || "").trim().toLowerCase().startsWith("data:video/");
+}
+
+function referenceLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "reference image";
+  if (text.startsWith("asset://")) return text;
+
+  try {
+    const url = new URL(text);
+    return pathTail(url.pathname) || url.hostname;
+  } catch {
+    return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+  }
+}
+
+function pathTail(value) {
+  return String(value || "")
+    .split("/")
+    .filter(Boolean)
+    .pop();
 }
 
 function formatBytes(bytes) {
