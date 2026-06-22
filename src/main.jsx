@@ -28,17 +28,30 @@ const MODELS = [
   { id: "doubao-seedance-2-0-260128", label: "2.0 Quality" }
 ];
 
+const RESOLUTION_OPTIONS = [
+  { value: "480p", label: "480p" },
+  { value: "720p", label: "720p" },
+  { value: "1080p", label: "1080p" },
+  { value: "4k", label: "4K" }
+];
+
+const QWEN_RESOLUTION_OPTIONS = ["720P", "1080P"];
+const QWEN_RATIO_OPTIONS = ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"];
+
 const STATUS_CLASS = {
   ok: "good",
   unchecked: "idle",
   rate_limited: "warn",
   invalid: "bad",
   error: "bad",
+  pending: "idle",
   queued: "idle",
   running: "warn",
   succeeded: "good",
   failed: "bad",
+  unknown: "bad",
   expired: "bad",
+  canceled: "bad",
   cancelled: "bad"
 };
 
@@ -81,6 +94,21 @@ function App() {
     generate_audio: true,
     watermark: false
   });
+  const [qwenConfig, setQwenConfig] = React.useState(null);
+  const [qwenBusy, setQwenBusy] = React.useState(false);
+  const [qwenLookupId, setQwenLookupId] = React.useState("");
+  const [qwenTasks, setQwenTasks] = React.useState([]);
+  const [qwenForm, setQwenForm] = React.useState({
+    mode: "t2v",
+    prompt:
+      "A compact ceramic robot waters tiny basil plants on a sunny kitchen shelf, gentle handheld camera movement, natural light",
+    imageUrl: "",
+    resolution: "720P",
+    ratio: "16:9",
+    duration: 5,
+    seed: -1,
+    watermark: false
+  });
 
   React.useEffect(() => {
     refreshKeys();
@@ -88,10 +116,13 @@ function App() {
     api("/api/config")
       .then(setConfig)
       .catch((error) => setNotice({ type: "bad", text: error.message }));
+    api("/api/qwen/config")
+      .then(setQwenConfig)
+      .catch((error) => setNotice({ type: "bad", text: error.message }));
   }, []);
 
   React.useEffect(() => {
-    if (form.model.includes("seedance-2-0-fast") && form.resolution === "1080p") {
+    if (!isResolutionSupported(form.model, form.resolution)) {
       updateForm("resolution", "720p");
     }
   }, [form.model, form.resolution]);
@@ -114,6 +145,17 @@ function App() {
 
     return () => window.clearInterval(timer);
   }, [tasks]);
+
+  React.useEffect(() => {
+    const active = qwenTasks.filter((task) => ["pending", "running"].includes(task.status));
+    if (!active.length) return undefined;
+
+    const timer = window.setInterval(() => {
+      active.forEach((task) => pollQwenTask(task.id, { quiet: true }));
+    }, 15000);
+
+    return () => window.clearInterval(timer);
+  }, [qwenTasks]);
 
   const stats = React.useMemo(() => {
     const usable = keys.filter((key) => key.usable && key.status === "ok").length;
@@ -307,8 +349,69 @@ function App() {
     }
   }
 
+  async function submitQwenGenerate(event) {
+    event.preventDefault();
+    setQwenBusy(true);
+    setNotice(null);
+
+    try {
+      const data = await api("/api/qwen/happyhorse/generate", {
+        method: "POST",
+        body: qwenForm
+      });
+      const task = normalizeQwenTask(data, "pending", qwenForm);
+      if (!task.id) {
+        throw new Error("DashScope did not return a task id.");
+      }
+
+      setQwenTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+      setNotice({ type: "good", text: `Qwen task ${task.id} submitted` });
+      window.setTimeout(() => pollQwenTask(task.id, { quiet: true }), 2500);
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+    } finally {
+      setQwenBusy(false);
+    }
+  }
+
+  async function pollQwenTask(id, options = {}) {
+    if (!id) return;
+
+    try {
+      const data = await api(`/api/qwen/tasks/${encodeURIComponent(id)}`);
+      const task = normalizeQwenTask(data, data.status || "running");
+      setQwenTasks((current) => {
+        const exists = current.some((item) => item.id === id);
+        if (!exists) return [task, ...current];
+        return current.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                ...task,
+                mode: task.mode || item.mode,
+                model: task.model || item.model,
+                resolution: task.resolution || item.resolution,
+                ratio: task.ratio || item.ratio,
+                duration: task.duration || item.duration
+              }
+            : item
+        );
+      });
+      if (!options.quiet) {
+        setNotice({ type: "good", text: `Qwen task ${id} is ${task.status}` });
+      }
+    } catch (error) {
+      setQwenTasks((current) => current.map((task) => (task.id === id ? { ...task, status: "failed", error: error.message } : task)));
+      if (!options.quiet) setNotice({ type: "bad", text: error.message });
+    }
+  }
+
   function updateForm(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+  }
+
+  function updateQwenForm(name, value) {
+    setQwenForm((current) => ({ ...current, [name]: value }));
   }
 
   async function handlePaste(event) {
@@ -320,23 +423,19 @@ function App() {
   }
 
   async function readClipboardMedia(kind) {
-    if (!navigator.clipboard?.read) {
-      setNotice({ type: "bad", text: `This browser only supports Ctrl+V paste for ${kind}s.` });
-      return;
-    }
-
     try {
-      const items = await navigator.clipboard.read();
-      for (const item of items) {
-        const mediaType = item.types.find((type) => type.startsWith(`${kind}/`));
-        if (!mediaType) continue;
-
-        const blob = await item.getType(mediaType);
-        await attachMediaFile(new File([blob], `clipboard.${extensionForType(mediaType)}`, { type: mediaType }));
+      const media = await getClipboardMedia(kind);
+      if (media?.file) {
+        await attachMediaFile(media.file);
         return;
       }
 
-      setNotice({ type: "bad", text: `Clipboard does not contain a ${kind}.` });
+      if (media?.url) {
+        attachMediaUrl(kind, media.url, media);
+        return;
+      }
+
+      setNotice({ type: "bad", text: `Clipboard does not contain a ${kind} or direct ${kind} URL.` });
     } catch (error) {
       setNotice({ type: "bad", text: error.message || `Could not read clipboard ${kind}.` });
     }
@@ -354,6 +453,47 @@ function App() {
     }
 
     setNotice({ type: "bad", text: "Paste an image or video file." });
+  }
+
+  function attachMediaUrl(kind, url, media = {}) {
+    if (kind === "image") {
+      if (isDataImageUrl(url)) {
+        const size = media.size || estimateDataUrlBytes(url);
+        if (size > MAX_PASTED_IMAGE_BYTES) {
+          setNotice({ type: "bad", text: "Image is larger than 15 MB." });
+          return;
+        }
+
+        setImageAsset({
+          name: media.name || "clipboard image",
+          size,
+          type: media.type || dataUrlMimeType(url) || "image",
+          preview: url
+        });
+      } else {
+        setImageAsset(null);
+      }
+
+      updateForm("imageUrl", url);
+      setNotice({ type: "good", text: "Clipboard image attached" });
+      return;
+    }
+
+    if (kind === "video") {
+      if (isDataVideoUrl(url)) {
+        setNotice({
+          type: "bad",
+          text: "Pasted video files need a public URL or asset:// ID before Seedance can use them."
+        });
+        return;
+      }
+
+      videoUploadTokenRef.current = null;
+      setVideoUploadBusy(false);
+      setVideoAsset(null);
+      updateForm("videoUrl", url);
+      setNotice({ type: "good", text: "Reference video URL pasted" });
+    }
   }
 
   async function attachImageFile(file) {
@@ -471,6 +611,11 @@ function App() {
     const url = typeof reference === "string" ? reference.trim() : String(reference?.url || "").trim();
     if (!url) return false;
 
+    if (isDataImageUrl(url) && estimateDataUrlBytes(url) > MAX_PASTED_IMAGE_BYTES) {
+      setNotice({ type: "bad", text: "Reference image is larger than 15 MB." });
+      return false;
+    }
+
     let added = false;
     setForm((current) => {
       const currentReferences = Array.isArray(current.referenceImages) ? current.referenceImages : [];
@@ -518,17 +663,50 @@ function App() {
 
   async function pasteReferenceImage() {
     try {
-      const items = await navigator.clipboard.read();
-      for (const item of items) {
-        const mediaType = item.types.find((type) => type.startsWith("image/"));
-        if (!mediaType) continue;
-
-        const blob = await item.getType(mediaType);
-        await attachReferenceImageFile(new File([blob], `reference.${extensionForType(mediaType)}`, { type: mediaType }));
+      const media = await getClipboardMedia("image");
+      if (media?.file) {
+        await attachReferenceImageFile(media.file);
         return;
       }
 
-      setNotice({ type: "bad", text: "Clipboard does not contain an image." });
+      if (media?.url) {
+        addReferenceImage({
+          url: media.url,
+          name: media.name || (isDataImageUrl(media.url) ? "clipboard image" : referenceLabel(media.url)),
+          size: media.size,
+          type: media.type,
+          preview: media.url
+        });
+        return;
+      }
+
+      setNotice({ type: "bad", text: "Clipboard does not contain an image or direct image URL." });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
+    }
+  }
+
+  async function pasteQwenImage() {
+    try {
+      const media = await getClipboardMedia("image");
+      if (media?.file) {
+        if (media.file.size > MAX_PASTED_IMAGE_BYTES) {
+          setNotice({ type: "bad", text: "Image is larger than 15 MB." });
+          return;
+        }
+
+        updateQwenForm("imageUrl", await fileToDataUrl(media.file, "Qwen first frame"));
+        setNotice({ type: "good", text: "Qwen first frame attached" });
+        return;
+      }
+
+      if (media?.url) {
+        updateQwenForm("imageUrl", media.url);
+        setNotice({ type: "good", text: "Qwen first frame attached" });
+        return;
+      }
+
+      setNotice({ type: "bad", text: "Clipboard does not contain an image or direct image URL." });
     } catch (error) {
       setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
     }
@@ -796,10 +974,11 @@ function App() {
             <label className="field">
               <span>Resolution</span>
               <select value={form.resolution} onChange={(event) => updateForm("resolution", event.target.value)}>
-                <option value="720p">720p</option>
-                <option value="1080p" disabled={form.model.includes("seedance-2-0-fast")}>
-                  1080p
-                </option>
+                {RESOLUTION_OPTIONS.map((resolution) => (
+                  <option key={resolution.value} value={resolution.value} disabled={!isResolutionSupported(form.model, resolution.value)}>
+                    {resolution.label}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="field">
@@ -849,6 +1028,131 @@ function App() {
             )}
           </div>
         </section>
+
+        {qwenConfig?.enabled && (
+          <section className="panel qwen-console">
+            <PanelTitle icon={<Film size={18} />} title="Qwen Console" />
+            <form className="qwen-form" onSubmit={submitQwenGenerate}>
+              {!qwenConfig?.configured && (
+                <div className="inline-alert warn">
+                  <AlertTriangle size={16} />
+                  <span>Set DASHSCOPE_API_KEY in .env</span>
+                </div>
+              )}
+
+              <div className="segmented qwen-mode">
+                <button
+                  type="button"
+                  className={qwenForm.mode === "t2v" ? "selected" : ""}
+                  onClick={() => updateQwenForm("mode", "t2v")}
+                >
+                  Text
+                </button>
+                <button
+                  type="button"
+                  className={qwenForm.mode === "i2v" ? "selected" : ""}
+                  onClick={() => updateQwenForm("mode", "i2v")}
+                >
+                  Image
+                </button>
+              </div>
+
+              <label className="field">
+                <span>Prompt</span>
+                <textarea
+                  className="qwen-prompt"
+                  value={qwenForm.prompt}
+                  onChange={(event) => updateQwenForm("prompt", event.target.value)}
+                  placeholder="Describe the clip"
+                />
+              </label>
+
+              {qwenForm.mode === "i2v" && (
+                <div className="field">
+                  <span>First frame</span>
+                  <div className="image-actions qwen-image-actions">
+                    <button type="button" onClick={pasteQwenImage}>
+                      <Clipboard size={16} />
+                      Paste
+                    </button>
+                    <input
+                      value={qwenForm.imageUrl.startsWith("data:image/") ? "clipboard image attached" : qwenForm.imageUrl}
+                      onChange={(event) => updateQwenForm("imageUrl", event.target.value)}
+                      placeholder="https://... or data:image/..."
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="qwen-grid">
+                <label className="field">
+                  <span>Resolution</span>
+                  <select value={qwenForm.resolution} onChange={(event) => updateQwenForm("resolution", event.target.value)}>
+                    {QWEN_RESOLUTION_OPTIONS.map((resolution) => (
+                      <option key={resolution} value={resolution}>
+                        {resolution}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Ratio</span>
+                  <select
+                    value={qwenForm.ratio}
+                    onChange={(event) => updateQwenForm("ratio", event.target.value)}
+                    disabled={qwenForm.mode === "i2v"}
+                  >
+                    {QWEN_RATIO_OPTIONS.map((ratio) => (
+                      <option key={ratio} value={ratio}>
+                        {ratio}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Duration</span>
+                  <input
+                    type="number"
+                    min="3"
+                    max="15"
+                    value={qwenForm.duration}
+                    onChange={(event) => updateQwenForm("duration", Number(event.target.value))}
+                  />
+                </label>
+                <label className="field">
+                  <span>Seed</span>
+                  <input type="number" value={qwenForm.seed} onChange={(event) => updateQwenForm("seed", event.target.value)} />
+                </label>
+              </div>
+
+              <Toggle label="Watermark" checked={qwenForm.watermark} onChange={(value) => updateQwenForm("watermark", value)} />
+
+              <button className="primary qwen-submit" type="submit" disabled={qwenBusy}>
+                {qwenBusy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
+                Generate
+              </button>
+            </form>
+
+            <div className="lookup qwen-lookup">
+              <input value={qwenLookupId} onChange={(event) => setQwenLookupId(event.target.value)} placeholder="Qwen task ID" />
+              <button onClick={() => pollQwenTask(qwenLookupId.trim())}>
+                <RefreshCw size={16} />
+                Poll
+              </button>
+            </div>
+
+            <div className="task-list qwen-task-list">
+              {qwenTasks.length ? (
+                qwenTasks.map((task) => <QwenTaskCard key={task.id} task={task} onPoll={() => pollQwenTask(task.id)} />)
+              ) : (
+                <div className="empty-state">
+                  <Video size={22} />
+                  No Qwen tasks
+                </div>
+              )}
+            </div>
+          </section>
+        )}
       </section>
 
       <footer className="footer-line">
@@ -930,6 +1234,44 @@ function TaskCard({ task, onPoll }) {
   );
 }
 
+function QwenTaskCard({ task, onPoll }) {
+  const videoUrl = task.videoUrl || extractQwenVideoUrl(task);
+
+  return (
+    <article className="task-card qwen-task-card">
+      <div className="task-head">
+        <div>
+          <div className="task-id">{task.id}</div>
+          <div className="task-sub">
+            <StatusPill status={task.status} />
+            {task.mode && <span>{task.mode.toUpperCase()}</span>}
+            {task.duration && <span>{task.duration}s</span>}
+            {task.resolution && <span>{task.resolution}</span>}
+          </div>
+        </div>
+        <button className="icon-button" onClick={onPoll} aria-label="Poll Qwen task">
+          <RefreshCw size={15} />
+        </button>
+      </div>
+
+      {videoUrl ? (
+        <div className="video-box">
+          <video src={videoUrl} controls />
+          <button className="copy-button" onClick={() => navigator.clipboard?.writeText(videoUrl)}>
+            <Copy size={14} />
+            Copy URL
+          </button>
+        </div>
+      ) : (
+        <div className="pending-box">
+          {task.status === "failed" ? <AlertTriangle size={20} /> : <Clock3 size={20} />}
+          <span>{task.error || "Waiting for video_url"}</span>
+        </div>
+      )}
+    </article>
+  );
+}
+
 function AutosaveStatus({ autosave }) {
   const status = autosave.status || "saving";
   const isSaved = status === "saved";
@@ -967,6 +1309,227 @@ function normalizeTask(data, fallbackStatus) {
   };
 }
 
+function normalizeQwenTask(data, fallbackStatus, request = {}) {
+  const output = data.output || {};
+  return {
+    id: data.id || output.task_id || data.task_id,
+    model: data.model || request.model || (request.mode === "i2v" ? "happyhorse-1.1-i2v" : "happyhorse-1.1-t2v"),
+    mode: data.mode || request.mode || "",
+    status: normalizeQwenStatus(data.status || output.task_status || fallbackStatus),
+    output,
+    usage: data.usage,
+    requestId: data.request_id,
+    videoUrl: data.videoUrl || extractQwenVideoUrl(data),
+    resolution: data.resolution || request.resolution,
+    ratio: data.ratio || request.ratio,
+    duration: data.duration || request.duration,
+    error: output.message || data.message || data.error?.message || data.error
+  };
+}
+
+function normalizeQwenStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "canceled") return "cancelled";
+  return normalized || "unknown";
+}
+
+function extractQwenVideoUrl(data) {
+  const output = data?.output || data || {};
+  const direct = data?.videoUrl || output.video_url || output.video?.url || output.url;
+  if (typeof direct === "string") return direct;
+  if (direct?.url) return String(direct.url);
+
+  const results = Array.isArray(output.results) ? output.results : Array.isArray(output.videos) ? output.videos : [];
+  for (const item of results) {
+    if (typeof item === "string") return item;
+    if (item?.url) return String(item.url);
+    if (item?.video_url) return String(item.video_url);
+  }
+
+  return "";
+}
+
+function isResolutionSupported(model, resolution) {
+  if (isSeedance2FastModel(model)) {
+    return resolution === "480p" || resolution === "720p";
+  }
+
+  return RESOLUTION_OPTIONS.some((option) => option.value === resolution);
+}
+
+function isSeedance2FastModel(model) {
+  return String(model || "").includes("seedance-2-0-fast");
+}
+
+async function getClipboardMedia(kind) {
+  let readError = null;
+
+  if (navigator.clipboard?.read) {
+    try {
+      const items = await navigator.clipboard.read();
+      const media = await mediaFromClipboardItems(items, kind);
+      if (media) return media;
+    } catch (error) {
+      readError = error;
+    }
+  }
+
+  const text = await readClipboardTextFallback();
+  const url = extractClipboardMediaUrl(text, kind);
+  if (url) return { url };
+
+  if (kind === "image") {
+    const localImage = await readLocalClipboardImageFallback();
+    if (localImage?.dataUrl) {
+      return {
+        url: localImage.dataUrl,
+        name: localImage.name,
+        size: localImage.size,
+        type: localImage.type
+      };
+    }
+  }
+
+  if (readError) {
+    throw new Error(clipboardReadErrorMessage(readError, kind));
+  }
+
+  if (!navigator.clipboard?.read && !navigator.clipboard?.readText) {
+    throw new Error(`This browser only supports Ctrl+V paste for ${kind}s.`);
+  }
+
+  return null;
+}
+
+async function readLocalClipboardImageFallback() {
+  try {
+    return await api("/api/clipboard/image", { method: "POST" });
+  } catch (error) {
+    if (error.status === 404 || error.status === 501) return null;
+    throw error;
+  }
+}
+
+async function mediaFromClipboardItems(items, kind) {
+  for (const item of Array.from(items || [])) {
+    const mediaType = item.types.find((type) => type.startsWith(`${kind}/`));
+    if (!mediaType) continue;
+
+    const blob = await item.getType(mediaType);
+    return {
+      file: new File([blob], `clipboard.${extensionForType(mediaType)}`, { type: mediaType })
+    };
+  }
+
+  for (const item of Array.from(items || [])) {
+    const textTypes = ["text/uri-list", "text/html", "text/plain"].filter((type) => item.types.includes(type));
+
+    for (const textType of textTypes) {
+      const blob = await item.getType(textType);
+      const url = extractClipboardMediaUrl(await blob.text(), kind, textType);
+      if (url) return { url };
+    }
+  }
+
+  return null;
+}
+
+async function readClipboardTextFallback() {
+  if (!navigator.clipboard?.readText) return "";
+
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return "";
+  }
+}
+
+function extractClipboardMediaUrl(value, kind, mimeType = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+
+  if (mimeType === "text/html" || /<\/?[a-z][\s\S]*>/i.test(text)) {
+    const htmlUrl = mediaUrlFromHtml(text, kind);
+    if (htmlUrl) return htmlUrl;
+  }
+
+  const uriListUrl = mediaUrlFromUriList(text, kind);
+  if (uriListUrl) return uriListUrl;
+
+  const directUrl = text.match(/\b(?:https?:\/\/|asset:\/\/|data:[a-z]+\/)[^\s<>"']+/i)?.[0];
+  return isUsableMediaReference(directUrl, kind) ? cleanClipboardUrl(directUrl) : "";
+}
+
+function mediaUrlFromHtml(value, kind) {
+  try {
+    const document = new DOMParser().parseFromString(value, "text/html");
+    const selectors = kind === "image" ? ["img[src]", "source[srcset]", "source[src]"] : ["video[src]", "source[src]"];
+
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      const rawValue = element?.getAttribute(selector.includes("srcset") ? "srcset" : "src");
+      const candidate = selector.includes("srcset") ? firstSrcsetUrl(rawValue) : rawValue;
+      if (isUsableMediaReference(candidate, kind)) return cleanClipboardUrl(candidate);
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+function mediaUrlFromUriList(value, kind) {
+  const lines = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+
+  for (const line of lines) {
+    if (isUsableMediaReference(line, kind)) return cleanClipboardUrl(line);
+  }
+
+  return "";
+}
+
+function firstSrcsetUrl(value) {
+  return String(value || "")
+    .split(",")
+    .map((candidate) => candidate.trim().split(/\s+/)[0])
+    .find(Boolean);
+}
+
+function isUsableMediaReference(value, kind) {
+  const text = cleanClipboardUrl(value);
+  if (!text) return false;
+
+  const lower = text.toLowerCase();
+  if (lower.startsWith(`data:${kind}/`)) return true;
+  if (lower.startsWith("asset://")) return true;
+
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function cleanClipboardUrl(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[\u0000-\u001f]+/g, "")
+    .replace(/[)\].,;'"`]+$/g, "");
+}
+
+function clipboardReadErrorMessage(error, kind) {
+  const message = error?.message || `Could not read clipboard ${kind}.`;
+  if (/denied|notallowed|permission|not focused|document is not focused/i.test(message)) {
+    return `Clipboard ${kind} paste was blocked by the browser. Allow clipboard access for this site or use Ctrl+V in the Generation panel.`;
+  }
+
+  return message;
+}
+
 function getMediaFileFromClipboard(clipboardData) {
   const items = Array.from(clipboardData?.items || []);
   const fileItems = items.filter((item) => item.kind === "file");
@@ -995,6 +1558,34 @@ function extensionForType(type) {
 
 function isDataVideoUrl(value) {
   return String(value || "").trim().toLowerCase().startsWith("data:video/");
+}
+
+function isDataImageUrl(value) {
+  return String(value || "").trim().toLowerCase().startsWith("data:image/");
+}
+
+function dataUrlMimeType(value) {
+  const match = /^data:([^;,]+)[;,]/i.exec(String(value || ""));
+  return match?.[1]?.toLowerCase() || "";
+}
+
+function estimateDataUrlBytes(value) {
+  const text = String(value || "");
+  const match = /^data:[^,]*,(.*)$/s.exec(text);
+  if (!match) return 0;
+
+  const payload = match[1];
+  if (/^data:[^,]*;base64,/i.test(text)) {
+    const normalized = payload.replace(/\s/g, "");
+    const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+    return Math.max(Math.floor((normalized.length * 3) / 4) - padding, 0);
+  }
+
+  try {
+    return decodeURIComponent(payload).length;
+  } catch {
+    return payload.length;
+  }
 }
 
 function referenceLabel(value) {
@@ -1036,6 +1627,7 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `Request failed with HTTP ${response.status}`);
+    error.status = response.status;
     error.keys = data.keys;
     throw error;
   }

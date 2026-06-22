@@ -7,6 +7,7 @@ Local web app for Seedance 2.0 on Volcengine Ark. It includes:
 - round-robin key rotation
 - Seedance 2.0 / Seedance 2.0 Fast task creation
 - task polling and video preview
+- optional Qwen Console for HappyHorse 1.1 text-to-video and image-to-video
 - clipboard image/video paste for reference media inputs
 - automatic Litterbox upload for pasted reference videos
 - optional autosave of generated videos to a local folder
@@ -23,6 +24,10 @@ npm run dev
 Open the Vite URL shown in the terminal. In development, the frontend runs on port 5173 and proxies `/api` to the Express backend on port 8790.
 
 You can provide keys in `.env` with `ARK_API_KEYS`, or paste them into the Key Pool panel and activate them from the UI. Keys are stored in backend memory only and are never returned unmasked by the API.
+
+Qwen Console is disabled by default. To show it, set `QWEN_CONSOLE_ENABLED=true` and `DASHSCOPE_API_KEY` in `.env`. It can submit HappyHorse 1.1 text-to-video tasks with `happyhorse-1.1-t2v` and first-frame image-to-video tasks with `happyhorse-1.1-i2v`, then poll task IDs from the same panel. Override `DASHSCOPE_VIDEO_ENDPOINT` or `DASHSCOPE_TASK_ENDPOINT` only if your DashScope account uses a different region endpoint.
+
+Backend outbound requests go direct by default. To enable a proxy for Ark calls, public media URL preflight, Litterbox uploads, and autosave downloads, set `APP_PROXY_URL` or `ARK_PROXY_URL` to a value such as `socks5://127.0.0.1:2080`; `APP_PROXY_URL` wins when both are set. Set the chosen value to `off` to force direct connections.
 
 For first-frame image-to-video, focus the Generation panel and paste an image with `Ctrl+V`, or use the Paste button in the Image field. Public URLs still work in the same field.
 
@@ -42,6 +47,13 @@ Use the Autosave panel to enable local saving of generated videos. Choose a fold
 - Create task: `POST /contents/generations/tasks`
 - Query task: `GET /contents/generations/tasks/{id}`
 - Key check: `GET /contents/generations/tasks?page_num=1&page_size=1`
+
+## Qwen Defaults
+
+- Submit task: `DASHSCOPE_VIDEO_ENDPOINT`
+- Query task: `GET {DASHSCOPE_TASK_ENDPOINT}/{task_id}`
+- Models: `happyhorse-1.1-t2v`, `happyhorse-1.1-i2v`
+- Resolutions: `720P`, `1080P`
 
 ## Notes
 

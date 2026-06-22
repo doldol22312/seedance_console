@@ -14,11 +14,14 @@ import { SocksProxyAgent } from "socks-proxy-agent";
 const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 const DEFAULT_PROXY_URL = "";
 const DEFAULT_LITTERBOX_UPLOAD_URL = "https://litterbox.catbox.moe/resources/internals/api.php";
+const DEFAULT_DASHSCOPE_VIDEO_ENDPOINT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis";
+const DEFAULT_DASHSCOPE_TASK_ENDPOINT = "https://dashscope-intl.aliyuncs.com/api/v1/tasks";
 const PORT = Number(process.env.PORT || 8787);
 const BASE_URL = stripTrailingSlash(process.env.ARK_BASE_URL || DEFAULT_BASE_URL);
-const PROXY_URL = normalizeProxyUrl(process.env.ARK_PROXY_URL ?? DEFAULT_PROXY_URL);
+const PROXY_URL = resolveProxyUrl();
 const PROXY_AGENT = PROXY_URL ? new SocksProxyAgent(PROXY_URL) : null;
 const REQUEST_TIMEOUT_MS = Number(process.env.ARK_TIMEOUT_MS || 120_000);
+const DASHSCOPE_TIMEOUT_MS = Number(process.env.DASHSCOPE_TIMEOUT_MS || REQUEST_TIMEOUT_MS);
 const MEDIA_PREFLIGHT_TIMEOUT_MS = Number(process.env.MEDIA_PREFLIGHT_TIMEOUT_MS || 20_000);
 const MEDIA_PREFLIGHT_BYTES = Number(process.env.MEDIA_PREFLIGHT_BYTES || 2048);
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "64mb";
@@ -31,6 +34,18 @@ const MAX_LITTERBOX_VIDEO_BYTES = Number(process.env.LITTERBOX_MAX_VIDEO_BYTES |
 const AUTOSAVE_SETTINGS_PATH = path.resolve(process.env.AUTOSAVE_SETTINGS_PATH || ".autosave-settings.json");
 const AUTOSAVE_DOWNLOAD_TIMEOUT_MS = Number(process.env.AUTOSAVE_DOWNLOAD_TIMEOUT_MS || 300_000);
 const FOLDER_PICKER_TIMEOUT_MS = Number(process.env.FOLDER_PICKER_TIMEOUT_MS || 300_000);
+const CLIPBOARD_IMAGE_TIMEOUT_MS = Number(process.env.CLIPBOARD_IMAGE_TIMEOUT_MS || 10_000);
+const MAX_CLIPBOARD_IMAGE_BYTES = Number(process.env.CLIPBOARD_MAX_IMAGE_BYTES || 15 * 1024 * 1024);
+const SEEDANCE_2_RESOLUTIONS = ["480p", "720p", "1080p", "4k"];
+const SEEDANCE_2_FAST_RESOLUTIONS = new Set(["480p", "720p"]);
+const QWEN_CONSOLE_ENABLED = parseBoolean(process.env.QWEN_CONSOLE_ENABLED, false);
+const DASHSCOPE_API_KEY = String(process.env.DASHSCOPE_API_KEY || process.env.QWEN_API_KEY || process.env.ALIBABA_API_KEY || "").trim();
+const DASHSCOPE_VIDEO_ENDPOINT = stripTrailingSlash(process.env.DASHSCOPE_VIDEO_ENDPOINT || DEFAULT_DASHSCOPE_VIDEO_ENDPOINT);
+const DASHSCOPE_TASK_ENDPOINT = stripTrailingSlash(process.env.DASHSCOPE_TASK_ENDPOINT || DEFAULT_DASHSCOPE_TASK_ENDPOINT);
+const HAPPYHORSE_T2V_MODEL = "happyhorse-1.1-t2v";
+const HAPPYHORSE_I2V_MODEL = "happyhorse-1.1-i2v";
+const HAPPYHORSE_RESOLUTIONS = ["720P", "1080P"];
+const HAPPYHORSE_T2V_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"];
 const execFileAsync = promisify(execFile);
 
 const app = express();
@@ -59,6 +74,13 @@ app.get("/api/health", (_req, res) => {
     autosave: {
       enabled: autosaveSettings.enabled,
       directory: autosaveSettings.directory
+    },
+    qwen: {
+      enabled: QWEN_CONSOLE_ENABLED,
+      configured: Boolean(DASHSCOPE_API_KEY),
+      videoEndpoint: DASHSCOPE_VIDEO_ENDPOINT,
+      taskEndpoint: DASHSCOPE_TASK_ENDPOINT,
+      timeoutMs: DASHSCOPE_TIMEOUT_MS
     },
     keyCount: pool.summary().length,
     activeKeys: pool.summary().filter((key) => key.usable).length
@@ -151,6 +173,76 @@ app.post("/api/uploads/reference-video", async (req, res) => {
   }
 });
 
+app.post("/api/clipboard/image", async (_req, res) => {
+  try {
+    const image = await readClipboardImage();
+    res.json(image);
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.get("/api/qwen/config", (_req, res) => {
+  res.json({
+    enabled: QWEN_CONSOLE_ENABLED,
+    configured: Boolean(DASHSCOPE_API_KEY),
+    videoEndpoint: DASHSCOPE_VIDEO_ENDPOINT,
+    taskEndpoint: DASHSCOPE_TASK_ENDPOINT,
+    defaults: {
+      mode: "t2v",
+      resolution: "720P",
+      ratio: "16:9",
+      duration: 5,
+      watermark: false,
+      seed: -1
+    },
+    models: [
+      {
+        id: HAPPYHORSE_T2V_MODEL,
+        name: "HappyHorse 1.1 Text to Video",
+        mode: "t2v"
+      },
+      {
+        id: HAPPYHORSE_I2V_MODEL,
+        name: "HappyHorse 1.1 Image to Video",
+        mode: "i2v"
+      }
+    ],
+    resolutions: HAPPYHORSE_RESOLUTIONS,
+    ratios: HAPPYHORSE_T2V_RATIOS
+  });
+});
+
+app.post("/api/qwen/happyhorse/generate", async (req, res) => {
+  try {
+    ensureQwenConsoleEnabled();
+    const request = buildHappyHorsePayload(req.body || {});
+    const response = await dashscopeFetch({
+      url: DASHSCOPE_VIDEO_ENDPOINT,
+      method: "POST",
+      body: request.payload
+    });
+
+    res.json(publicHappyHorseTask(response, request));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+app.get("/api/qwen/tasks/:id", async (req, res) => {
+  try {
+    ensureQwenConsoleEnabled();
+    const response = await dashscopeFetch({
+      url: `${DASHSCOPE_TASK_ENDPOINT}/${encodeURIComponent(req.params.id)}`,
+      method: "GET"
+    });
+
+    res.json(publicHappyHorseTask(response));
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 app.post("/api/generate", async (req, res) => {
   try {
     const payload = await buildCreatePayload(req.body);
@@ -223,7 +315,7 @@ if (process.env.NODE_ENV === "production") {
 
 app.listen(PORT, () => {
   console.log(`Seedance API server listening on http://localhost:${PORT}`);
-  console.log(`Ark proxy: ${publicProxyUrl(PROXY_URL) || "direct"}`);
+  console.log(`Outbound proxy: ${publicProxyUrl(PROXY_URL) || "direct"}`);
 });
 
 function createKeyPool({ baseUrl, timeoutMs, cooldownMs }) {
@@ -428,11 +520,11 @@ async function buildCreatePayload(input = {}) {
     throw httpError(400, "Enter a prompt or at least one reference URL.");
   }
 
-  const resolution = oneOf(input.resolution, ["720p", "1080p"], "720p");
+  const resolution = oneOf(input.resolution, SEEDANCE_2_RESOLUTIONS, "720p");
   const duration = parseSeedanceDuration(input.duration);
 
-  if (model.includes("seedance-2-0-fast") && resolution === "1080p") {
-    throw httpError(400, "Seedance 2.0 Fast does not support 1080p. Use 720p or switch to Seedance 2.0 Quality.");
+  if (isSeedance2FastModel(model) && !SEEDANCE_2_FAST_RESOLUTIONS.has(resolution)) {
+    throw httpError(400, `Seedance 2.0 Fast supports only 480p and 720p. Switch to Seedance 2.0 Quality for ${resolution}.`);
   }
 
   const payload = {
@@ -460,18 +552,172 @@ async function buildCreatePayload(input = {}) {
   return payload;
 }
 
+function buildHappyHorsePayload(input = {}) {
+  const mode = oneOf(String(input.mode || "t2v").trim(), ["t2v", "i2v"], "t2v");
+  const prompt = String(input.prompt || "").trim();
+  const resolution = normalizeHappyHorseResolution(input.resolution);
+  const duration = parseHappyHorseDuration(input.duration);
+  const seed = parseOptionalHappyHorseSeed(input.seed);
+  const payload = {
+    model: mode === "i2v" ? HAPPYHORSE_I2V_MODEL : HAPPYHORSE_T2V_MODEL,
+    input: {},
+    parameters: {
+      resolution,
+      duration,
+      watermark: Boolean(input.watermark)
+    }
+  };
+
+  if (prompt) {
+    payload.input.prompt = prompt;
+  } else if (mode === "t2v") {
+    throw httpError(400, "Enter a prompt for HappyHorse text-to-video.");
+  }
+
+  if (mode === "t2v") {
+    payload.parameters.ratio = oneOf(input.ratio, HAPPYHORSE_T2V_RATIOS, "16:9");
+  } else {
+    const imageUrl = normalizeMediaReference(input.imageUrl || input.firstFrameUrl);
+    if (!imageUrl) {
+      throw httpError(400, "Add a first-frame image URL or pasted image for HappyHorse image-to-video.");
+    }
+    if (!isHappyHorseImageReference(imageUrl)) {
+      throw httpError(400, "HappyHorse first frame must be an http(s) image URL or data:image base64 payload.");
+    }
+
+    payload.input.media = [
+      {
+        type: "first_frame",
+        url: imageUrl
+      }
+    ];
+  }
+
+  if (seed !== null) {
+    payload.parameters.seed = seed;
+  }
+
+  return {
+    mode,
+    model: payload.model,
+    prompt,
+    resolution,
+    ratio: payload.parameters.ratio || null,
+    duration,
+    payload
+  };
+}
+
+function ensureQwenConsoleEnabled() {
+  if (!QWEN_CONSOLE_ENABLED) {
+    throw httpError(403, "Qwen Console is disabled.");
+  }
+}
+
+async function dashscopeFetch({ url, method, body }) {
+  if (!DASHSCOPE_API_KEY) {
+    throw httpError(400, "Set DASHSCOPE_API_KEY in .env before using Qwen Console.");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DASHSCOPE_TIMEOUT_MS);
+
+  try {
+    const headers = {
+      Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      "Content-Type": "application/json"
+    };
+    if (body) {
+      headers["X-DashScope-Async"] = "enable";
+    }
+
+    const response = await externalFetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal
+    });
+
+    const text = await response.text();
+    const data = parseJson(text);
+
+    if (!response.ok) {
+      throw httpError(response.status, extractDashScopeMessage(data, text, response.status), data);
+    }
+
+    return data || {};
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw httpError(504, "DashScope request timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function publicHappyHorseTask(response, request = {}) {
+  const output = response?.output || {};
+  return {
+    ...response,
+    id: output.task_id || response?.id || null,
+    status: normalizeProviderStatus(output.task_status || response?.status || "PENDING"),
+    mode: request.mode || null,
+    model: request.model || response?.model || null,
+    resolution: request.resolution || null,
+    ratio: request.ratio || response?.usage?.ratio || null,
+    duration: request.duration || response?.usage?.duration || null,
+    videoUrl: output.video_url || null
+  };
+}
+
+function normalizeHappyHorseResolution(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return oneOf(normalized, HAPPYHORSE_RESOLUTIONS, "720P");
+}
+
+function parseHappyHorseDuration(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed)) return 5;
+  if (parsed < 3 || parsed > 15) {
+    throw httpError(400, "HappyHorse duration must be an integer from 3 to 15 seconds.");
+  }
+  return parsed;
+}
+
+function parseOptionalHappyHorseSeed(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed === -1) return null;
+  if (parsed < 0 || parsed > 2_147_483_647) {
+    throw httpError(400, "HappyHorse seed must be -1 or an integer from 0 to 2147483647.");
+  }
+  return parsed;
+}
+
+function isHappyHorseImageReference(value) {
+  const text = String(value || "").trim();
+  if (isDataImageUrl(text)) return true;
+
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 async function arkFetch({ baseUrl, path: requestPath, method, key, timeoutMs, body }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${baseUrl}${requestPath}`, {
+    const response = await externalFetch(`${baseUrl}${requestPath}`, {
       method,
       headers: {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json"
       },
-      agent: PROXY_AGENT || undefined,
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal
     });
@@ -544,6 +790,14 @@ function stripTrailingSlash(value) {
 
 function isDataVideoUrl(value) {
   return String(value || "").trim().toLowerCase().startsWith("data:video/");
+}
+
+function isDataImageUrl(value) {
+  return String(value || "").trim().toLowerCase().startsWith("data:image/");
+}
+
+function isSeedance2FastModel(model) {
+  return String(model || "").includes("seedance-2-0-fast");
 }
 
 function isAssetUrl(value) {
@@ -673,6 +927,116 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
   }
 }
 
+async function readClipboardImage() {
+  if (process.platform !== "win32") {
+    throw httpError(501, "The local clipboard image fallback is only available on Windows.");
+  }
+
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$ErrorActionPreference = "Stop"
+$maxBytes = ${MAX_CLIPBOARD_IMAGE_BYTES}
+
+function Write-ClipboardImagePayload([byte[]]$bytes, [string]$name, [string]$mimeType) {
+  if ($bytes.Length -gt $maxBytes) {
+    [Console]::Error.Write("Clipboard image is larger than the configured limit.")
+    exit 3
+  }
+
+  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+  @{
+    dataUrl = "data:$mimeType;base64,$([Convert]::ToBase64String($bytes))"
+    name = $name
+    size = $bytes.Length
+    type = $mimeType
+  } | ConvertTo-Json -Compress | Write-Output
+}
+
+function MimeTypeForImagePath([string]$filePath) {
+  switch ([System.IO.Path]::GetExtension($filePath).ToLowerInvariant()) {
+    ".jpg" { "image/jpeg"; break }
+    ".jpeg" { "image/jpeg"; break }
+    ".gif" { "image/gif"; break }
+    ".webp" { "image/webp"; break }
+    ".bmp" { "image/bmp"; break }
+    ".tif" { "image/tiff"; break }
+    ".tiff" { "image/tiff"; break }
+    default { "image/png"; break }
+  }
+}
+
+$bitmap = [System.Windows.Forms.Clipboard]::GetImage()
+if ($null -ne $bitmap) {
+  $stream = [System.IO.MemoryStream]::new()
+  try {
+    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+    Write-ClipboardImagePayload ($stream.ToArray()) "windows clipboard image" "image/png"
+    exit 0
+  } finally {
+    $stream.Dispose()
+    $bitmap.Dispose()
+  }
+}
+
+if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
+  $imageExtensions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  @(".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff") | ForEach-Object { [void]$imageExtensions.Add($_) }
+
+  foreach ($filePath in [System.Windows.Forms.Clipboard]::GetFileDropList()) {
+    if ([string]::IsNullOrWhiteSpace($filePath) -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+      continue
+    }
+
+    if (-not $imageExtensions.Contains([System.IO.Path]::GetExtension($filePath))) {
+      continue
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($filePath)
+    Write-ClipboardImagePayload $bytes ([System.IO.Path]::GetFileName($filePath)) (MimeTypeForImagePath $filePath)
+    exit 0
+  }
+}
+
+exit 2
+`;
+  const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
+      {
+        timeout: CLIPBOARD_IMAGE_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: Math.ceil(MAX_CLIPBOARD_IMAGE_BYTES * 1.5) + 4096
+      }
+    );
+    const image = parseJson(stdout);
+    if (!image?.dataUrl) {
+      throw httpError(502, "Local clipboard reader returned an invalid image payload.");
+    }
+
+    return image;
+  } catch (error) {
+    if (error.status) {
+      throw error;
+    }
+
+    const exitCode = Number(error.code);
+    if (exitCode === 2) {
+      throw httpError(404, "Clipboard does not contain an image.");
+    }
+    if (exitCode === 3) {
+      throw httpError(400, `Clipboard image is larger than ${formatMb(MAX_CLIPBOARD_IMAGE_BYTES)} MB.`);
+    }
+    if (error.killed || error.signal === "SIGTERM") {
+      throw httpError(504, "Local clipboard image read timed out.");
+    }
+    throw httpError(500, `Could not read local clipboard image: ${error.message}`);
+  }
+}
+
 function maybeAutosaveTask(taskId, task) {
   const videoUrl = extractGeneratedVideoUrl(task);
   const existing = autosaveTaskMap.get(taskId);
@@ -710,11 +1074,10 @@ async function saveGeneratedVideo(state) {
 
   try {
     await fs.mkdir(path.dirname(state.path), { recursive: true });
-    const response = await fetch(state.url, {
+    const response = await externalFetch(state.url, {
       headers: {
         Accept: "video/*,*/*;q=0.8"
       },
-      agent: PROXY_AGENT || undefined,
       signal: controller.signal
     });
 
@@ -802,7 +1165,7 @@ async function uploadReferenceVideoToLitterbox(input) {
   form.set("fileToUpload", new File([bytes], fileName, { type: mimeType }));
 
   try {
-    const response = await fetch(LITTERBOX_UPLOAD_URL, {
+    const response = await externalFetch(LITTERBOX_UPLOAD_URL, {
       method: "POST",
       body: form,
       signal: controller.signal
@@ -908,7 +1271,7 @@ async function preflightMediaUrl(url, kind) {
   const timer = setTimeout(() => controller.abort(), MEDIA_PREFLIGHT_TIMEOUT_MS);
 
   try {
-    const response = await fetch(url, {
+    const response = await externalFetch(url, {
       method: "GET",
       headers: {
         Accept: kind === "video" ? "video/*,*/*;q=0.8" : "audio/*,*/*;q=0.8",
@@ -1012,6 +1375,26 @@ function normalizeProxyUrl(value) {
   return `socks5://${trimmed}`;
 }
 
+function resolveProxyUrl() {
+  const configured = process.env.APP_PROXY_URL ?? process.env.ARK_PROXY_URL;
+  if (configured === undefined || String(configured).trim() === "") {
+    return normalizeProxyUrl(DEFAULT_PROXY_URL);
+  }
+
+  return normalizeProxyUrl(configured);
+}
+
+function externalFetch(url, options = {}) {
+  if (!PROXY_AGENT) {
+    return fetch(url, options);
+  }
+
+  return fetch(url, {
+    ...options,
+    agent: PROXY_AGENT
+  });
+}
+
 function publicProxyUrl(value) {
   if (!value) return null;
 
@@ -1043,6 +1426,15 @@ function extractArkMessage(data, fallback, status) {
   return `Volcengine Ark returned HTTP ${status}.`;
 }
 
+function extractDashScopeMessage(data, fallback, status) {
+  if (data?.output?.message) return data.output.message;
+  if (data?.message) return data.message;
+  if (data?.code && data?.message) return `${data.code}: ${data.message}`;
+  if (data?.error?.message) return data.error.message;
+  if (fallback) return fallback.slice(0, 500);
+  return `DashScope returned HTTP ${status}.`;
+}
+
 function decorateArkMessage(message) {
   const text = String(message || "");
   if (/content\[\d+\]\.video_url/i.test(text) && /timeout while fetching resource/i.test(text)) {
@@ -1050,6 +1442,17 @@ function decorateArkMessage(message) {
   }
 
   return text;
+}
+
+function normalizeProviderStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "canceled") return "cancelled";
+  if (normalized === "pending") return "pending";
+  if (normalized === "running") return "running";
+  if (normalized === "succeeded") return "succeeded";
+  if (normalized === "failed") return "failed";
+  if (normalized === "unknown") return "unknown";
+  return normalized || "unknown";
 }
 
 function httpError(status, message, details = null) {
