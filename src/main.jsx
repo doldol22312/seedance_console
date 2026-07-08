@@ -38,6 +38,58 @@ const RESOLUTION_OPTIONS = [
 
 const QWEN_RESOLUTION_OPTIONS = ["720P", "1080P"];
 const QWEN_RATIO_OPTIONS = ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"];
+const SEEDREAM_RATIO_OPTIONS = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9", "9:21"];
+const SEEDREAM_MIN_PIXELS = 1280 * 720;
+const SEEDREAM_MAX_PIXELS = 2048 * 2048;
+const SEEDREAM_RESOLUTION_OPTIONS = {
+  "16:9": [
+    { value: "1280x720", label: "720p" },
+    { value: "1920x1080", label: "1080p" },
+    { value: "2048x1152", label: "2K" }
+  ],
+  "9:16": [
+    { value: "720x1280", label: "720p" },
+    { value: "1080x1920", label: "1080p" },
+    { value: "1152x2048", label: "2K" }
+  ],
+  "1:1": [
+    { value: "1024x1024", label: "1K" },
+    { value: "1536x1536", label: "1.5K" },
+    { value: "2048x2048", label: "2K" }
+  ],
+  "4:3": [
+    { value: "1280x960", label: "1K" },
+    { value: "1536x1152", label: "1.5K" },
+    { value: "2048x1536", label: "2K" }
+  ],
+  "3:4": [
+    { value: "960x1280", label: "1K" },
+    { value: "1152x1536", label: "1.5K" },
+    { value: "1536x2048", label: "2K" }
+  ],
+  "3:2": [
+    { value: "1248x832", label: "1K" },
+    { value: "1872x1248", label: "1.5K" },
+    { value: "2048x1365", label: "2K" }
+  ],
+  "2:3": [
+    { value: "832x1248", label: "1K" },
+    { value: "1248x1872", label: "1.5K" },
+    { value: "1365x2048", label: "2K" }
+  ],
+  "21:9": [
+    { value: "1512x648", label: "1K" },
+    { value: "2268x972", label: "1.5K" },
+    { value: "2560x1097", label: "2K" }
+  ],
+  "9:21": [
+    { value: "648x1512", label: "1K" },
+    { value: "972x2268", label: "1.5K" },
+    { value: "1097x2560", label: "2K" }
+  ]
+};
+const SEEDREAM_CUSTOM_RESOLUTION = "custom";
+const SEEDREAM_INPUT_RESOLUTION = "input-image";
 
 const STATUS_CLASS = {
   ok: "good",
@@ -77,6 +129,9 @@ function App() {
   const [videoAsset, setVideoAsset] = React.useState(null);
   const videoUploadTokenRef = React.useRef(null);
   const [referenceImageInput, setReferenceImageInput] = React.useState("");
+  const [seedreamImageAsset, setSeedreamImageAsset] = React.useState(null);
+  const [seedreamReferenceInput, setSeedreamReferenceInput] = React.useState("");
+  const [seedreamReferenceImages, setSeedreamReferenceImages] = React.useState([]);
   const [autosave, setAutosave] = React.useState({
     enabled: false,
     directory: ""
@@ -115,8 +170,11 @@ function App() {
   const [imageForm, setImageForm] = React.useState({
     model: "doubao-seedream-5-0-pro-260628",
     prompt: "Nazuna Nanakusa from Call of the Night anime",
+    inputImage: "",
     image: "",
-    size: "2048x2048",
+    aspectRatio: "16:9",
+    resolution: "1920x1080",
+    customSize: "1920x1080",
     response_format: "url",
     output_format: "png",
     watermark: false
@@ -363,6 +421,18 @@ function App() {
 
   async function submitImageGenerate(event) {
     event.preventDefault();
+
+    let imageRequest;
+    try {
+      imageRequest = await buildSeedreamImageRequest({
+        ...imageForm,
+        referenceImages: seedreamReferenceImages
+      });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+      return;
+    }
+
     setImageBusy(true);
     setNotice(null);
 
@@ -370,11 +440,11 @@ function App() {
       const data = await api("/api/images/generate", {
         method: "POST",
         body: {
-          ...imageForm,
+          ...imageRequest,
           optimize_prompt_options: { mode: "standard" }
         }
       });
-      setImages((current) => [normalizeImageResult(data, imageForm), ...current]);
+      setImages((current) => [normalizeImageResult(data, imageRequest), ...current]);
       setNotice({ type: "good", text: `Image generated with ${data.key?.label || "rotated key"}` });
       refreshKeys();
     } catch (error) {
@@ -451,7 +521,17 @@ function App() {
   }
 
   function updateImageForm(name, value) {
-    setImageForm((current) => ({ ...current, [name]: value }));
+    setImageForm((current) => {
+      if (name === "aspectRatio") {
+        return {
+          ...current,
+          aspectRatio: value,
+          resolution: defaultSeedreamResolution(value)
+        };
+      }
+
+      return { ...current, [name]: value };
+    });
   }
 
   async function handlePaste(event) {
@@ -750,6 +830,169 @@ function App() {
     } catch (error) {
       setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
     }
+  }
+
+  async function attachSeedreamInputImageFile(file) {
+    if (!file?.type?.startsWith("image/")) {
+      setNotice({ type: "bad", text: "Select an image file." });
+      return;
+    }
+
+    if (file.size > MAX_PASTED_IMAGE_BYTES) {
+      setNotice({ type: "bad", text: "Image is larger than 15 MB." });
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file, "Seedream input image");
+    setSeedreamImageAsset({
+      name: file.name || "input image",
+      size: file.size,
+      type: file.type,
+      preview: dataUrl
+    });
+    updateImageForm("inputImage", dataUrl);
+    setNotice({ type: "good", text: "Seedream input image attached" });
+  }
+
+  async function pasteSeedreamInputImage() {
+    try {
+      const media = await getClipboardMedia("image");
+      if (media?.file) {
+        await attachSeedreamInputImageFile(media.file);
+        return;
+      }
+
+      if (media?.url) {
+        setSeedreamImageAsset(
+          isDataImageUrl(media.url)
+            ? {
+                name: media.name || "clipboard image",
+                size: media.size || estimateDataUrlBytes(media.url),
+                type: media.type || dataUrlMimeType(media.url) || "image",
+                preview: media.url
+              }
+            : null
+        );
+        updateImageForm("inputImage", media.url);
+        setNotice({ type: "good", text: "Seedream input image attached" });
+        return;
+      }
+
+      setNotice({ type: "bad", text: "Clipboard does not contain an image or direct image URL." });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
+    }
+  }
+
+  function clearSeedreamInputImage() {
+    setSeedreamImageAsset(null);
+    updateImageForm("inputImage", "");
+  }
+
+  function addSeedreamReferenceImage(reference) {
+    const url = typeof reference === "string" ? reference.trim() : String(reference?.url || "").trim();
+    if (!url) return false;
+
+    if (isDataImageUrl(url) && estimateDataUrlBytes(url) > MAX_PASTED_IMAGE_BYTES) {
+      setNotice({ type: "bad", text: "Reference image is larger than 15 MB." });
+      return false;
+    }
+
+    let added = false;
+    setSeedreamReferenceImages((current) => {
+      if (current.length >= MAX_REFERENCE_IMAGES) {
+        setNotice({ type: "bad", text: `Seedream supports up to ${MAX_REFERENCE_IMAGES} reference images.` });
+        return current;
+      }
+
+      const duplicate = current.some((item) => String(item?.url || item).trim() === url);
+      if (duplicate) {
+        setNotice({ type: "warn", text: "Reference image is already attached." });
+        return current;
+      }
+
+      added = true;
+      const item =
+        typeof reference === "string"
+          ? { url, name: referenceLabel(url), preview: url }
+          : { ...reference, url, preview: reference.preview || url };
+
+      return [...current, item];
+    });
+
+    if (added) setNotice({ type: "good", text: "Seedream reference image attached" });
+    return added;
+  }
+
+  function addSeedreamReferenceImageUrl() {
+    if (addSeedreamReferenceImage(seedreamReferenceInput)) {
+      setSeedreamReferenceInput("");
+    }
+  }
+
+  async function attachSeedreamReferenceImageFile(file) {
+    if (!file?.type?.startsWith("image/")) {
+      setNotice({ type: "bad", text: "Select image files only." });
+      return false;
+    }
+
+    if (file.size > MAX_PASTED_IMAGE_BYTES) {
+      setNotice({ type: "bad", text: "Reference image is larger than 15 MB." });
+      return false;
+    }
+
+    const dataUrl = await fileToDataUrl(file, "Seedream reference image");
+    return addSeedreamReferenceImage({
+      url: dataUrl,
+      name: file.name || "reference image",
+      size: file.size,
+      type: file.type,
+      preview: dataUrl
+    });
+  }
+
+  async function pasteSeedreamReferenceImage() {
+    try {
+      const media = await getClipboardMedia("image");
+      if (media?.file) {
+        await attachSeedreamReferenceImageFile(media.file);
+        return;
+      }
+
+      if (media?.url) {
+        addSeedreamReferenceImage({
+          url: media.url,
+          name: media.name || (isDataImageUrl(media.url) ? "clipboard image" : referenceLabel(media.url)),
+          size: media.size,
+          type: media.type,
+          preview: media.url
+        });
+        return;
+      }
+
+      setNotice({ type: "bad", text: "Clipboard does not contain an image or direct image URL." });
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message || "Could not read clipboard image." });
+    }
+  }
+
+  async function handleSeedreamInputFileChange(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await attachSeedreamInputImageFile(file);
+  }
+
+  async function handleSeedreamReferenceFilesChange(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    for (const file of files) {
+      if (seedreamReferenceImages.length >= MAX_REFERENCE_IMAGES) break;
+      await attachSeedreamReferenceImageFile(file);
+    }
+  }
+
+  function removeSeedreamReferenceImage(index) {
+    setSeedreamReferenceImages((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
   function clearVideoAsset() {
@@ -1060,27 +1303,139 @@ function App() {
             />
           </label>
 
-          <label className="field">
-            <span>Reference images</span>
+          <div className="field seedream-image-input">
+            <span>Image input</span>
+            <div className={`paste-zone ${seedreamImageAsset ? "has-image" : ""}`} tabIndex="0">
+              {seedreamImageAsset ? (
+                <>
+                  <img src={seedreamImageAsset.preview} alt="Seedream input" />
+                  <div className="image-chip">
+                    <strong>{seedreamImageAsset.name}</strong>
+                    <small>{formatBytes(seedreamImageAsset.size)} · {seedreamImageAsset.type}</small>
+                  </div>
+                  <button className="image-clear" type="button" onClick={clearSeedreamInputImage} aria-label="Clear Seedream input image">
+                    <X size={15} />
+                  </button>
+                </>
+              ) : (
+                <div className="paste-empty">
+                  <ImagePlus size={24} />
+                  <strong>Add image</strong>
+                  <small>upload, paste, or use a URL</small>
+                </div>
+              )}
+            </div>
+            <div className="image-actions seedream-image-actions">
+              <button type="button" onClick={pasteSeedreamInputImage}>
+                <Clipboard size={16} />
+                Paste
+              </button>
+              <label className="file-button">
+                <FolderOpen size={16} />
+                File
+                <input type="file" accept="image/*" onChange={handleSeedreamInputFileChange} />
+              </label>
+              <input
+                value={imageForm.inputImage.startsWith("data:image/") ? "local image attached" : imageForm.inputImage}
+                onChange={(event) => {
+                  setSeedreamImageAsset(null);
+                  updateImageForm("inputImage", event.target.value);
+                }}
+                placeholder="https://... or asset://..."
+              />
+            </div>
+          </div>
+
+          <div className="field seedream-reference-field">
+            <div className="field-heading">
+              <span>Reference images</span>
+              <small>{seedreamReferenceImages.length}/{MAX_REFERENCE_IMAGES}</small>
+            </div>
+            <div className={`reference-grid ${seedreamReferenceImages.length ? "" : "is-empty"}`}>
+              {seedreamReferenceImages.length ? (
+                seedreamReferenceImages.map((reference, index) => (
+                  <div className="reference-tile" key={`${reference.url}-${index}`}>
+                    <img src={reference.preview || reference.url} alt={`Seedream reference ${index + 1}`} />
+                    <button type="button" onClick={() => removeSeedreamReferenceImage(index)} aria-label="Remove Seedream reference image">
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="reference-empty">
+                  <ImagePlus size={20} />
+                  <span>Add reference images</span>
+                </div>
+              )}
+            </div>
+            <div className="image-actions seedream-reference-actions">
+              <button type="button" onClick={pasteSeedreamReferenceImage}>
+                <Clipboard size={16} />
+                Paste
+              </button>
+              <label className="file-button">
+                <FolderOpen size={16} />
+                Files
+                <input type="file" accept="image/*" multiple onChange={handleSeedreamReferenceFilesChange} />
+              </label>
+              <input
+                value={seedreamReferenceInput}
+                onChange={(event) => setSeedreamReferenceInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addSeedreamReferenceImageUrl();
+                  }
+                }}
+                placeholder="https://... or asset://..."
+              />
+              <button type="button" onClick={addSeedreamReferenceImageUrl}>
+                <ImagePlus size={16} />
+                Add
+              </button>
+            </div>
             <textarea
               className="reference-input"
               value={imageForm.image}
               onChange={(event) => updateImageForm("image", event.target.value)}
-              placeholder="https://... or data:image/... one per line"
+              placeholder="Optional extra URLs, one per line"
             />
-          </label>
+          </div>
 
           <div className="field-grid image-options">
             <label className="field">
-              <span>Size</span>
-              <select value={imageForm.size} onChange={(event) => updateImageForm("size", event.target.value)}>
-                <option value="1024x1024">1024x1024</option>
-                <option value="1536x1536">1536x1536</option>
-                <option value="1920x1080">1920x1080</option>
-                <option value="1080x1920">1080x1920</option>
-                <option value="2048x2048">2048x2048</option>
+              <span>Aspect</span>
+              <select value={imageForm.aspectRatio} onChange={(event) => updateImageForm("aspectRatio", event.target.value)}>
+                {SEEDREAM_RATIO_OPTIONS.map((ratio) => (
+                  <option key={ratio} value={ratio}>
+                    {ratio}
+                  </option>
+                ))}
               </select>
             </label>
+            <label className="field">
+              <span>Resolution</span>
+              <select value={imageForm.resolution} onChange={(event) => updateImageForm("resolution", event.target.value)}>
+                {(SEEDREAM_RESOLUTION_OPTIONS[imageForm.aspectRatio] || []).map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} · {option.value}
+                  </option>
+                ))}
+                <option value={SEEDREAM_CUSTOM_RESOLUTION}>Custom</option>
+                <option value={SEEDREAM_INPUT_RESOLUTION}>Input image</option>
+              </select>
+            </label>
+            {imageForm.resolution === SEEDREAM_CUSTOM_RESOLUTION && (
+              <label className="field custom-size-field">
+                <span>Custom size</span>
+                <input
+                  value={imageForm.customSize}
+                  onChange={(event) => updateImageForm("customSize", event.target.value)}
+                  placeholder="1920x1080"
+                  spellCheck="false"
+                />
+              </label>
+            )}
             <label className="field">
               <span>Format</span>
               <select value={imageForm.output_format} onChange={(event) => updateImageForm("output_format", event.target.value)}>
@@ -1451,6 +1806,92 @@ function normalizeImageResult(data, request) {
     format,
     src: item.url || `data:image/${format};base64,${item.b64_json || ""}`
   };
+}
+
+async function buildSeedreamImageRequest(form) {
+  const size = await resolveSeedreamSize(form);
+  const images = normalizeSeedreamRequestImages(form);
+
+  return {
+    ...form,
+    image: images,
+    size
+  };
+}
+
+function normalizeSeedreamRequestImages(form) {
+  const values = [
+    form.inputImage,
+    ...(Array.isArray(form.referenceImages) ? form.referenceImages.map((item) => item?.url || item) : []),
+    ...String(form.image || "").split(/\n+/)
+  ];
+
+  return values.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 10);
+}
+
+async function resolveSeedreamSize(form) {
+  if (form.resolution === SEEDREAM_CUSTOM_RESOLUTION) {
+    const size = normalizeSeedreamSize(form.customSize);
+    if (!size) {
+      throw new Error("Custom size must use WIDTHxHEIGHT and stay between 1280x720 and 2048x2048 total pixels.");
+    }
+    return size;
+  }
+
+  if (form.resolution === SEEDREAM_INPUT_RESOLUTION) {
+    const inputImage = String(form.inputImage || "").trim();
+    if (!inputImage) {
+      throw new Error("Add an image input before using the Input image resolution.");
+    }
+
+    const dimensions = await readImageDimensions(inputImage);
+    const size = normalizeSeedreamSize(`${dimensions.width}x${dimensions.height}`);
+    if (!size) {
+      throw new Error("Input image resolution must be between 1280x720 and 2048x2048 total pixels.");
+    }
+    return size;
+  }
+
+  return form.resolution;
+}
+
+function defaultSeedreamResolution(aspectRatio) {
+  return SEEDREAM_RESOLUTION_OPTIONS[aspectRatio]?.[1]?.value || SEEDREAM_RESOLUTION_OPTIONS[aspectRatio]?.[0]?.value || "1920x1080";
+}
+
+function normalizeSeedreamSize(value) {
+  const match = String(value || "")
+    .trim()
+    .toLowerCase()
+    .match(/^(\d{2,5})\s*[x×]\s*(\d{2,5})$/);
+  if (!match) return "";
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return "";
+  if (width * height < SEEDREAM_MIN_PIXELS) return "";
+  if (width * height > SEEDREAM_MAX_PIXELS) return "";
+
+  return `${width}x${height}`;
+}
+
+function readImageDimensions(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      if (!image.naturalWidth || !image.naturalHeight) {
+        reject(new Error("Could not read the input image resolution."));
+        return;
+      }
+
+      resolve({
+        width: image.naturalWidth,
+        height: image.naturalHeight
+      });
+    };
+    image.onerror = () => reject(new Error("Could not load the input image to read its resolution."));
+    image.src = src;
+  });
 }
 
 function normalizeQwenTask(data, fallbackStatus, request = {}) {

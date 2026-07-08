@@ -6,6 +6,14 @@
   "scripts": {
     "dev": "concurrently -k -n api,web -c #00a676,#f05d5e \"npm:server\" \"npm:vite\"",
     "server": "cross-env PORT=8790 node --watch server/index.js",
+    "watchtower": "node server/watchtower.js",
+    "watchtower:once": "node server/watchtower.js --once",
+    "watchtower:dry-run": "node server/watchtower.js --once --dry-run",
+    "watchtower:keys": "cross-env ARK_PROXY_URL=socks5://127.0.0.1:2080 WATCHTOWER_IGNORE_ENV_KEYS=true WATCHTOWER_ARK_KEYS_FILE=../keychecker/working_doubao_models.txt node server/watchtower.js",
+    "watchtower:keys:once": "cross-env ARK_PROXY_URL=socks5://127.0.0.1:2080 WATCHTOWER_IGNORE_ENV_KEYS=true WATCHTOWER_ARK_KEYS_FILE=../keychecker/working_doubao_models.txt node server/watchtower.js --once",
+    "watchtower:keys:dry-run": "cross-env ARK_PROXY_URL=socks5://127.0.0.1:2080 WATCHTOWER_IGNORE_ENV_KEYS=true WATCHTOWER_ARK_KEYS_FILE=../keychecker/working_doubao_models.txt node server/watchtower.js --once --dry-run",
+    "watchtower:reset": "node -e \"fs=require('node:fs');fs.rmSync('.watchtower/ark-seed-models.json',{force:true})\"",
+    "watchtower:keys:reset": "node -e \"fs=require('node:fs');fs.rmSync('.watchtower/ark-seed-models-all-keys.json',{force:true})\"",
     "vite": "vite --host 0.0.0.0",
     "build": "vite build",
     "start": "cross-env NODE_ENV=production node server/index.js"

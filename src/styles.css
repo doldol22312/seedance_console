@@ -56,8 +56,31 @@ button {
   transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
 }
 
+.file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.file-button input {
+  display: none;
+}
+
 button:hover:not(:disabled) {
   transform: translateY(-1px);
+  border-color: var(--ink);
+}
+
+.file-button:hover {
   border-color: var(--ink);
 }
 
@@ -425,6 +448,10 @@ h2 {
   font-size: 12px;
 }
 
+.custom-size-field input {
+  font-family: "IBM Plex Mono", monospace;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -627,6 +654,14 @@ h2 {
 
 .reference-actions {
   grid-template-columns: auto 1fr auto;
+}
+
+.seedream-image-actions {
+  grid-template-columns: auto auto minmax(0, 1fr);
+}
+
+.seedream-reference-actions {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
 }
 
 .toggles {

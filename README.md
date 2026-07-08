@@ -55,6 +55,90 @@ Use the Autosave panel to enable local saving of generated videos. Choose a fold
 - Models: `happyhorse-1.1-t2v`, `happyhorse-1.1-i2v`
 - Resolutions: `720P`, `1080P`
 
+## Model Watchtower
+
+The watchtower polls Ark `/models` endpoints, tracks models matching `WATCHTOWER_MODEL_FILTER`, and sends Telegram alerts when matching models are added, removed, or changed.
+
+Add these to `.env`:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:telegram-token
+TELEGRAM_CHAT_ID=123456789
+TELEGRAM_COMMANDS=true
+ARK_PROXY_URL=socks5://127.0.0.1:2080
+WATCHTOWER_MODEL_FILTER=seed
+WATCHTOWER_INTERVAL_MS=60000
+WATCHTOWER_CONCURRENCY=64
+```
+
+To check every key in `../keychecker/working_doubao_models.txt`, use the key-file scripts:
+
+```bash
+npm run watchtower:keys:dry-run
+npm run watchtower:keys:once
+npm run watchtower:keys
+```
+
+Key-file mode queries every key independently with hashed key labels in the snapshot and alerts. The bundled key-file scripts set `ARK_PROXY_URL=socks5://127.0.0.1:2080` and `WATCHTOWER_IGNORE_ENV_KEYS=true`, so only keys from that file are checked through the local SOCKS5 proxy. Its default state file is `.watchtower/ark-seed-models-all-keys.json`.
+
+All-key alerts are grouped by model/change shape by default, so a new model visible on many keys is sent as one line with `keys=<count>` and sample hashed key labels instead of one line per key. Use `WATCHTOWER_AGGREGATE_CHANGES=false` only when you want raw per-key detail. `WATCHTOWER_MAX_CHANGE_LINES=120` caps the detailed change lines in one alert.
+
+The all-key scan uses `WATCHTOWER_CONCURRENCY=64` by default. On the local SOCKS5 proxy this cuts the 56-key, two-endpoint check from about 20 seconds to about 5 seconds.
+
+Telegram bot commands are registered automatically when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set and the continuous watcher is running:
+
+```text
+/status - show watcher status
+/check - run a model check now
+/models - list tracked Seed model groups
+/errors - show current key/API errors
+/reset confirm - delete the current baseline
+/ping - check bot responsiveness
+/help - show commands
+```
+
+Only `TELEGRAM_CHAT_ID` is allowed to execute commands. Command polling stores its offset in `.watchtower/telegram-offset.json` so old commands are not replayed after restart.
+
+Useful commands:
+
+```bash
+# Seed-family dry run without writing state or sending Telegram
+npm run watchtower:dry-run
+
+# One check using the normal Ark key pool
+npm run watchtower:once
+
+# Continuous watcher using the normal Ark key pool
+npm run watchtower
+
+# Dry run across every key in ../keychecker/working_doubao_models.txt
+npm run watchtower:keys:dry-run
+
+# One check across every key and write/update the all-key baseline
+npm run watchtower:keys:once
+
+# Continuous all-key watcher, through socks5://127.0.0.1:2080
+npm run watchtower:keys
+
+# Reset the normal baseline; next run creates a fresh baseline
+npm run watchtower:reset
+
+# Reset the all-key baseline; next all-key run creates a fresh baseline
+npm run watchtower:keys:reset
+```
+
+The first non-dry run writes `.watchtower/ark-seed-models.json` as the baseline and does not alert unless `WATCHTOWER_NOTIFY_INITIAL=true`. Later runs compare against that snapshot and send Telegram messages for changes.
+
+PowerShell helpers:
+
+```powershell
+# Run one all-key check with a Telegram token/chat id only for this process
+$env:TELEGRAM_BOT_TOKEN="123456:telegram-token"; $env:TELEGRAM_CHAT_ID="123456789"; npm run watchtower:keys:once; Remove-Item Env:TELEGRAM_BOT_TOKEN; Remove-Item Env:TELEGRAM_CHAT_ID
+
+# Ask Telegram for recent chat ids through the local SOCKS5 proxy
+curl.exe -sS --socks5 127.0.0.1:2080 "https://api.telegram.org/bot$env:TELEGRAM_BOT_TOKEN/getUpdates"
+```
+
 ## Notes
 
 Seedance task URLs are provider-hosted assets. Save finished videos promptly if you need durable storage.
