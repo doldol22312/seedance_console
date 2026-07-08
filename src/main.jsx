@@ -6,6 +6,7 @@ import {
   Clock3,
   Clipboard,
   Copy,
+  Download,
   Film,
   FolderOpen,
   Gauge,
@@ -65,10 +66,12 @@ function App() {
   const [keys, setKeys] = React.useState([]);
   const [keysBusy, setKeysBusy] = React.useState(false);
   const [generateBusy, setGenerateBusy] = React.useState(false);
+  const [imageBusy, setImageBusy] = React.useState(false);
   const [videoUploadBusy, setVideoUploadBusy] = React.useState(false);
   const [folderPickerBusy, setFolderPickerBusy] = React.useState(false);
   const [notice, setNotice] = React.useState(null);
   const [tasks, setTasks] = React.useState([]);
+  const [images, setImages] = React.useState([]);
   const [lookupId, setLookupId] = React.useState("");
   const [imageAsset, setImageAsset] = React.useState(null);
   const [videoAsset, setVideoAsset] = React.useState(null);
@@ -107,6 +110,15 @@ function App() {
     ratio: "16:9",
     duration: 5,
     seed: -1,
+    watermark: false
+  });
+  const [imageForm, setImageForm] = React.useState({
+    model: "doubao-seedream-5-0-pro-260628",
+    prompt: "Nazuna Nanakusa from Call of the Night anime",
+    image: "",
+    size: "2048x2048",
+    response_format: "url",
+    output_format: "png",
     watermark: false
   });
 
@@ -349,6 +361,30 @@ function App() {
     }
   }
 
+  async function submitImageGenerate(event) {
+    event.preventDefault();
+    setImageBusy(true);
+    setNotice(null);
+
+    try {
+      const data = await api("/api/images/generate", {
+        method: "POST",
+        body: {
+          ...imageForm,
+          optimize_prompt_options: { mode: "standard" }
+        }
+      });
+      setImages((current) => [normalizeImageResult(data, imageForm), ...current]);
+      setNotice({ type: "good", text: `Image generated with ${data.key?.label || "rotated key"}` });
+      refreshKeys();
+    } catch (error) {
+      setNotice({ type: "bad", text: error.message });
+      if (error.keys) setKeys(error.keys);
+    } finally {
+      setImageBusy(false);
+    }
+  }
+
   async function submitQwenGenerate(event) {
     event.preventDefault();
     setQwenBusy(true);
@@ -412,6 +448,10 @@ function App() {
 
   function updateQwenForm(name, value) {
     setQwenForm((current) => ({ ...current, [name]: value }));
+  }
+
+  function updateImageForm(name, value) {
+    setImageForm((current) => ({ ...current, [name]: value }));
   }
 
   async function handlePaste(event) {
@@ -1007,6 +1047,76 @@ function App() {
           </button>
         </form>
 
+        <form className="panel image-composer" onSubmit={submitImageGenerate}>
+          <PanelTitle icon={<ImagePlus size={18} />} title="Seedream" />
+
+          <label className="field">
+            <span>Prompt</span>
+            <textarea
+              className="prompt-input compact"
+              value={imageForm.prompt}
+              onChange={(event) => updateImageForm("prompt", event.target.value)}
+              placeholder="Describe the image"
+            />
+          </label>
+
+          <label className="field">
+            <span>Reference images</span>
+            <textarea
+              className="reference-input"
+              value={imageForm.image}
+              onChange={(event) => updateImageForm("image", event.target.value)}
+              placeholder="https://... or data:image/... one per line"
+            />
+          </label>
+
+          <div className="field-grid image-options">
+            <label className="field">
+              <span>Size</span>
+              <select value={imageForm.size} onChange={(event) => updateImageForm("size", event.target.value)}>
+                <option value="1024x1024">1024x1024</option>
+                <option value="1536x1536">1536x1536</option>
+                <option value="1920x1080">1920x1080</option>
+                <option value="1080x1920">1080x1920</option>
+                <option value="2048x2048">2048x2048</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Format</span>
+              <select value={imageForm.output_format} onChange={(event) => updateImageForm("output_format", event.target.value)}>
+                <option value="png">PNG</option>
+                <option value="jpeg">JPEG</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Return</span>
+              <select value={imageForm.response_format} onChange={(event) => updateImageForm("response_format", event.target.value)}>
+                <option value="url">URL</option>
+                <option value="b64_json">Base64</option>
+              </select>
+            </label>
+            <div className="toggles single">
+              <Toggle label="Watermark" checked={imageForm.watermark} onChange={(value) => updateImageForm("watermark", value)} />
+            </div>
+          </div>
+
+          <button className="launch-button" type="submit" disabled={imageBusy}>
+            {imageBusy ? <Loader2 className="spin" size={18} /> : <ImagePlus size={18} />}
+            Generate Image
+          </button>
+
+          <div className="image-results">
+            {images.length ? (
+              images.map((image) => <ImageCard key={image.id} image={image} />)
+            ) : (
+              <div className="empty-state">
+                <ImagePlus size={22} />
+                No images yet
+              </div>
+            )}
+          </div>
+        </form>
+
         <section className="panel results">
           <PanelTitle icon={<Film size={18} />} title="Tasks" />
           <div className="lookup">
@@ -1272,6 +1382,25 @@ function QwenTaskCard({ task, onPoll }) {
   );
 }
 
+function ImageCard({ image }) {
+  return (
+    <article className="generated-image-card">
+      <img src={image.src} alt={image.prompt} />
+      <div className="generated-image-meta">
+        <div>
+          <strong>{image.size || "image"}</strong>
+          <span>{image.format || "png"}</span>
+          {image.key?.label && <span>{image.key.label}</span>}
+        </div>
+        <a className="download-button" href={image.src} download={`seedream-${image.id}.${image.format || "png"}`} target="_blank" rel="noreferrer">
+          <Download size={14} />
+          Open
+        </a>
+      </div>
+    </article>
+  );
+}
+
 function AutosaveStatus({ autosave }) {
   const status = autosave.status || "saving";
   const isSaved = status === "saved";
@@ -1306,6 +1435,21 @@ function normalizeTask(data, fallbackStatus) {
     usage: data.usage,
     autosave: data.autosave || null,
     error: data.error?.message || data.error
+  };
+}
+
+function normalizeImageResult(data, request) {
+  const item = data.data?.find((entry) => entry?.url || entry?.b64_json) || {};
+  const format = item.output_format || request.output_format || "png";
+  return {
+    id: `${data.created || Date.now()}-${Math.random().toString(16).slice(2)}`,
+    model: data.model,
+    prompt: request.prompt,
+    key: data.key,
+    usage: data.usage,
+    size: item.size || request.size,
+    format,
+    src: item.url || `data:image/${format};base64,${item.b64_json || ""}`
   };
 }
 

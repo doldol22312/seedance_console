@@ -274,6 +274,31 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
+app.post("/api/images/generate", async (req, res) => {
+  try {
+    const payload = buildImagePayload(req.body);
+    const result = await pool.withKey(async (credential) => {
+      const response = await arkFetch({
+        baseUrl: BASE_URL,
+        path: "/images/generations",
+        method: "POST",
+        key: credential.key,
+        timeoutMs: REQUEST_TIMEOUT_MS,
+        body: payload
+      });
+
+      return { response, credential };
+    });
+
+    res.json({
+      ...result.response,
+      key: publicKeyView(result.credential)
+    });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
 app.get("/api/tasks/:id", async (req, res) => {
   try {
     const preferredKeyId = taskKeyMap.get(req.params.id);
@@ -781,7 +806,12 @@ function maskKey(key) {
 }
 
 function shouldRetryWithNextKey(error) {
-  return error.status === 401 || error.status === 403 || error.status === 429;
+  return (
+    error.status === 401 ||
+    error.status === 403 ||
+    error.status === 429 ||
+    error.details?.error?.code === "ModelNotOpen"
+  );
 }
 
 function stripTrailingSlash(value) {
@@ -1491,4 +1521,54 @@ function parseSeedanceDuration(value) {
     throw httpError(400, "Seedance 2.0 duration must be -1 or an integer from 4 to 15 seconds.");
   }
   return parsed;
+}
+
+function buildImagePayload(input = {}) {
+  const model = String(input.model || "doubao-seedream-5-0-pro-260628").trim();
+  const prompt = String(input.prompt || "").trim();
+  const image = normalizeSeedreamImages(input.image);
+  const size = String(input.size || "2048x2048").trim();
+  const responseFormat = oneOf(input.response_format, ["url", "b64_json"], "url");
+  const outputFormat = oneOf(input.output_format, ["jpeg", "png"], "png");
+  const optimizeMode = oneOf(input.optimize_prompt_options?.mode, ["standard"], "standard");
+
+  if (!model) {
+    throw httpError(400, "Select a Seedream model.");
+  }
+
+  if (!prompt) {
+    throw httpError(400, "Enter an image prompt.");
+  }
+
+  if (!size) {
+    throw httpError(400, "Select an image size.");
+  }
+
+  const payload = {
+    model,
+    prompt,
+    size,
+    response_format: responseFormat,
+    output_format: outputFormat,
+    watermark: Boolean(input.watermark),
+    optimize_prompt_options: {
+      mode: optimizeMode
+    }
+  };
+
+  if (image.length === 1) {
+    payload.image = image[0];
+  } else if (image.length > 1) {
+    payload.image = image;
+  }
+
+  return payload;
+}
+
+function normalizeSeedreamImages(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(/\n+/);
+  return values
+    .map((item) => normalizeMediaReference(item))
+    .filter(Boolean)
+    .slice(0, 10);
 }

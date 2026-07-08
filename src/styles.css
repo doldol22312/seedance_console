@@ -224,6 +224,7 @@ h2 {
 
 .key-panel,
 .composer,
+.image-composer,
 .results {
   padding-bottom: 14px;
 }
@@ -364,9 +365,15 @@ h2 {
   padding-right: 14px;
 }
 
-.composer .panel-title {
+.composer .panel-title,
+.image-composer .panel-title {
   margin-left: -14px;
   margin-right: -14px;
+}
+
+.image-composer {
+  padding-left: 14px;
+  padding-right: 14px;
 }
 
 .segmented {
@@ -406,6 +413,16 @@ h2 {
   min-height: 158px;
   font-size: 16px;
   line-height: 1.45;
+}
+
+.prompt-input.compact {
+  min-height: 112px;
+}
+
+.reference-input {
+  min-height: 78px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
 }
 
 .field-grid {
@@ -619,6 +636,10 @@ h2 {
   align-self: end;
 }
 
+.toggles.single {
+  grid-template-columns: 1fr;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -751,6 +772,69 @@ h2 {
   display: grid;
   gap: 10px;
   padding: 0 14px 14px;
+}
+
+.image-results {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.generated-image-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfa;
+  overflow: hidden;
+}
+
+.generated-image-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  background: #111;
+}
+
+.generated-image-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.generated-image-meta div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.generated-image-meta strong,
+.generated-image-meta span {
+  font: 600 12px/1.2 "IBM Plex Mono", monospace;
+}
+
+.generated-image-meta span {
+  color: var(--muted);
+}
+
+.download-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink);
+  background: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
 }
 
 .task-card {
